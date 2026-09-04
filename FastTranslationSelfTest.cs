@@ -99,7 +99,10 @@ internal static class FastTranslationSelfTest
             using (var localService = new FastTranslationService(new HttpClient(localHandler),
                 Path.Combine(folder, "local.json"), () => null))
             {
-                var result = await localService.TranslateAsync("The skill deals damage.", false, local, default);
+                var partials = new List<string>();
+                var result = await localService.TranslateAsync("The skill deals damage.", false, local, default, partials.Add);
+                checks["streaming_shows_chinese_before_completion"] = partials.Count > 0 && partials[0] == "這個技能" && result.FirstTextMs is not null;
+                checks["streaming_requested"] = JsonDocument.Parse(localHandler.LastBody).RootElement.GetProperty("stream").GetBoolean();
                 var cached = await localService.TranslateAsync("The skill deals damage.", false, local, default);
                 checks["local_model_translation_and_cache"] = result.Text == "這個技能造成傷害。" &&
                     cached.Text == result.Text && localHandler.Calls == 1;
@@ -107,8 +110,28 @@ internal static class FastTranslationSelfTest
                     localHandler.LastUri.Port == 11434 && localHandler.LastUri.AbsolutePath == "/api/chat";
                 checks["local_model_prompt_has_game_glossary"] = localHandler.LastBody.Contains("summons") &&
                     localHandler.LastBody.Contains("qwen3.5:0.8b");
+                await localService.WarmAsync(local, default);
+                await localService.WarmAsync(local, default);
+                checks["warmup_always_reaches_model_not_ocr_or_cache"] = localHandler.Calls == 3 && localHandler.LastBody.Contains("Stay ready.");
             }
             var blockedHandler = new FakeHandler { Status = HttpStatusCode.TooManyRequests };
+            var incomplete = new FakeLocalHandler { Body = "{\"message\":{\"content\":\"尚未完成\"},\"done\":false}\n" };
+            using (var service = new FastTranslationService(new HttpClient(incomplete), Path.Combine(folder, "incomplete.json")))
+            {
+                var result = await service.TranslateAsync("There is danger nearby.", false, local, default);
+                await service.TranslateAsync("There is danger nearby.", false, local, default);
+                checks["incomplete_stream_not_cached"] = result.Text is null && incomplete.Calls == 2;
+            }
+            var cancelling = new FakeLocalHandler();
+            using (var service = new FastTranslationService(new HttpClient(cancelling), Path.Combine(folder, "cancel.json")))
+            using (var cts = new CancellationTokenSource())
+            {
+                var cancelled = false;
+                try { await service.TranslateAsync("There is danger nearby.", false, local, cts.Token, _ => cts.Cancel()); }
+                catch (OperationCanceledException) { cancelled = true; }
+                await service.TranslateAsync("There is danger nearby.", false, local, default);
+                checks["superseded_stream_cancelled_and_not_cached"] = cancelled && cancelling.Calls == 2;
+            }
             using (var blocked = new FastTranslationService(new HttpClient(blockedHandler), Path.Combine(folder, "blocked.json"), () => "key"))
             {
                 var first = await blocked.TranslateAsync("Your army is ready.", false, azure, default);
@@ -145,6 +168,8 @@ internal static class FastTranslationSelfTest
         using var service = new FastTranslationService(cachePath: Path.ChangeExtension(outputPath, ".cache.json"));
         var config = CoachConfig.Load();
         config.OnlineTranslationEnabled = true;
+        // Explicit idle budget; a saved config may contain the last combat sample (1).
+        config.InferenceThreads = 4;
         var results = new List<object>();
         var passed = true;
         var samples = new (string Text, bool Quest)[]
@@ -159,9 +184,10 @@ internal static class FastTranslationSelfTest
         };
         foreach (var sample in samples)
         {
-            var result = await service.TranslateAsync(sample.Text, sample.Quest, config, default);
+            var partialCount = 0;
+            var result = await service.TranslateAsync(sample.Text, sample.Quest, config, default, _ => partialCount++);
             passed &= !string.IsNullOrWhiteSpace(result.Text);
-            results.Add(new { English = sample.Text, result.Text, result.Source, result.ElapsedMs });
+            results.Add(new { English = sample.Text, result.Text, result.Source, result.ElapsedMs, result.FirstTextMs, partialCount });
         }
         await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
         return passed && results.Count == samples.Length;
@@ -191,6 +217,7 @@ internal static class FastTranslationSelfTest
         public int Calls;
         public Uri? LastUri;
         public string LastBody = "";
+        public string Body = "{\"message\":{\"content\":\"這個技能\"},\"done\":false}\n{\"message\":{\"content\":\"造成傷害。\"},\"done\":true,\"done_reason\":\"stop\"}\n";
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Calls++;
@@ -198,7 +225,7 @@ internal static class FastTranslationSelfTest
             LastBody = await request.Content!.ReadAsStringAsync(token);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("""{"message":{"content":"這個技能造成傷害。"}}""")
+                Content = new StringContent(Body)
             };
         }
     }

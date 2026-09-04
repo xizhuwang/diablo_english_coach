@@ -25,7 +25,9 @@ internal static class SelfTest
                 milliseconds = watch.ElapsedMilliseconds,
                 lesson?.Title,
                 lesson?.English,
-                lesson?.Chinese
+                lesson?.Chinese,
+                lesson?.SentenceMeaning,
+                narration = lesson is null ? null : LessonScript.Narrate(lesson)
             });
             passed &= lesson is not null && lesson.Topic == topic;
         }
@@ -258,7 +260,7 @@ internal static class SelfTest
             var generatedPlanner = new IdleLessonPlanner(persistGenerated: false);
             var generated = new IdleLesson("AI 個人化 · 數位 IC",
                 "Describe the timing constraint before synthesis.",
-                "constraint＝限制條件。面試回答時先說明限制的目的。", "ic");
+                "constraint＝限制條件。面試回答時先說明限制的目的。", "ic", "合成前先說明時序限制。");
             checks["personalized_lesson_is_queued"] = generatedPlanner.AddPersonalizedLesson(generated);
             checks["personalized_exact_duplicate_rejected"] = !generatedPlanner.AddPersonalizedLesson(generated);
             generatedPlanner.Reset(0);
@@ -267,9 +269,17 @@ internal static class SelfTest
 
             var parsedPersonalized = CoachService.ParsePersonalizedLesson(
                 "AI 個人化 · 多益", "toeic", "confirm, schedule",
-                """{"english":"Please confirm the revised schedule.","traditional_chinese":"正式郵件中用來請對方確認。","keyword":"confirm","meaning":"確認"}""");
+                """{"english":"Please confirm the revised schedule.","sentence_meaning":"請確認修訂後的時程。","usage":"confirm 後面接要確認的事情。","keyword":"confirm"}""");
             checks["personalized_model_json_parses"] = parsedPersonalized is
                 { Topic: "toeic", English: "Please confirm the revised schedule." };
+            var script = LessonScript.Narrate(parsedPersonalized!);
+            checks["lesson_has_context_example_translation_usage"] = script.Contains("職場") &&
+                script.IndexOf("例句：") < script.IndexOf("整句意思是：") &&
+                script.Contains("請確認修訂後的時程") && script.Contains("confirm 後面接");
+            checks["curriculum_all_examples_have_meanings"] = lessons.Where(l => l.Title is "多益核心字" or "數位 IC 面試字" or "遊戲英文")
+                .All(l => !string.IsNullOrWhiteSpace(l.SentenceMeaning));
+            checks["context_free_model_fragment_rejected"] = CoachService.ParsePersonalizedLesson("AI", "toeic", "confirm",
+                """{"english":"Please confirm the schedule.","keyword":"confirm"}""") is null;
             checks["personalized_disallows_unapproved_term"] = CoachService.ParsePersonalizedLesson(
                 "AI 個人化 · 多益", "toeic", "confirm, schedule",
                 """{"english":"Please purchase the item.","traditional_chinese":"這是購買的意思。","keyword":"purchase","meaning":"購買"}""") is null;

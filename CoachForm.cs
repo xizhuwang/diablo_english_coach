@@ -264,7 +264,7 @@ internal sealed class CoachForm : Form
     {
         if (_translating || IsDisposed) return;
         _translating = true;
-        try { await _fastTranslation.TranslateAsync("Ready.", false, _config, _lifetimeCts.Token); }
+        try { await _fastTranslation.WarmAsync(_config, _lifetimeCts.Token); }
         catch (OperationCanceledException) { }
         finally
         {
@@ -326,7 +326,7 @@ internal sealed class CoachForm : Form
         {
             var load = _loadMonitor.Sample(false);
             _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
-            _scanTimer.Interval = load.CpuPercent >= 85 ? 2000 : load.ShouldDefer ? 1100 : 700;
+            _scanTimer.Interval = load.CpuPercent >= 85 ? 2000 : load.ShouldDefer ? 650 : 350;
             if (_gameWindow is null || !CaptureService.TryRefresh(_gameWindow, out var refreshed))
             {
                 _gameWindow = CaptureService.FindDiabloWindow();
@@ -357,10 +357,21 @@ internal sealed class CoachForm : Form
             }
 
             var dialogueText = await RecognizeRegionAsync(CaptureRegionKind.Dialogue);
+            // Deliver dialogue before the extra quest OCR pass; never make the
+            // latency-critical subtitle wait behind the slower secondary region.
+            if (IsDisposed || runVersion != _runVersion || (!force && (!_running || _settingsOpen))) return;
+            if (!force && NativeMethods.GetForegroundWindow() == _gameWindow.Handle)
+            {
+                var visible = OcrService.LooksLikeEnglishSubtitle(dialogueText);
+                if (visible) _lastDialogueAt = Environment.TickCount64;
+                _narrationGuard.ObserveDialogue(Environment.TickCount64, visible);
+                _narrationGuard.ObserveSpaceKey(Environment.TickCount64, _loadMonitor.DialogueKeyIdleMs);
+                HandleRecognizedText(dialogueText, CaptureRegionKind.Dialogue, load.ShouldDefer, load.Reason);
+            }
             // Quest objectives usually stay on screen much longer than dialogue.
             // Reading them every third cycle keeps game-time CPU usage modest while
             // still noticing a new objective within a few seconds.
-            var shouldScanQuest = force || _scanSequence++ % 3 == 0;
+            var shouldScanQuest = force || _scanSequence++ % 6 == 0;
             var questText = _config.QuestRegionConfigured && shouldScanQuest
                 ? await RecognizeRegionAsync(CaptureRegionKind.Quest)
                 : string.Empty;
@@ -400,7 +411,6 @@ internal sealed class CoachForm : Form
             _narrationGuard.ObserveDialogue(Environment.TickCount64, dialogueVisible);
             _narrationGuard.ObserveSpaceKey(Environment.TickCount64, _loadMonitor.DialogueKeyIdleMs);
             var deferCoaching = load.ShouldDefer;
-            HandleRecognizedText(dialogueText, CaptureRegionKind.Dialogue, deferCoaching, load.Reason);
             HandleRecognizedText(questText, CaptureRegionKind.Quest, deferCoaching, load.Reason);
 
             // Teaching has its own timer; OCR never waits for inference or speech.
@@ -545,12 +555,19 @@ internal sealed class CoachForm : Form
 
     private async Task TranslateVisibleAsync(string text, bool quest)
     {
+        CancelPersonalization();
+        _translationCts?.Cancel(); // Cancel inference, NOT an already playing paragraph.
+        _retryRequest = null;
         var version = ++_translationVersion;
         _retryTranslation = null;
         _queuedTranslation = (text, quest, version); // One newest item, never a growing FIFO.
-        _translationText = $"翻譯中 · {text}";
+        _translationText = FastTranslationService.QuickPreview(text);
         if (_speakingCts is null) _chineseLabel.Text = _translationText;
-        if (_translating) return;
+        if (_translating)
+        {
+            _fastTranslation.Cancel(); // Do not finish an obsolete sentence first.
+            return;
+        }
         _translating = true;
         try
         {
@@ -559,7 +576,8 @@ internal sealed class CoachForm : Form
                 _queuedTranslation = null;
                 var result = _previewMode && _previewTranslate is not null
                     ? await _previewTranslate(next.Text, next.Quest)
-                    : await _fastTranslation.TranslateAsync(next.Text, next.Quest, _config, _lifetimeCts.Token);
+                    : await _fastTranslation.TranslateAsync(next.Text, next.Quest, _config, _lifetimeCts.Token,
+                        partial => ShowPartialTranslation(next.Version, partial));
                 if (!_running || IsDisposed || next.Version != _translationVersion) continue;
                 _translationText = result.Text is { Length: > 0 }
                     ? result.Text : $"{result.Source} · {next.Text}";
@@ -589,6 +607,13 @@ internal sealed class CoachForm : Form
                 _ = TranslateVisibleAsync(waiting.Text, waiting.Quest);
             }
         }
+    }
+
+    private void ShowPartialTranslation(int version, string partial)
+    {
+        if (!_running || IsDisposed || _settingsOpen || version != _translationVersion) return;
+        _translationText = $"{partial} ▌（生成中，尚未完整）";
+        if (_speakingCts is null) _chineseLabel.Text = _translationText;
     }
 
     private void TeachingTick()
@@ -624,7 +649,7 @@ internal sealed class CoachForm : Form
             if (!_speechService.IsBusy && !_coachBusy) TrySpeaking(load);
         }
 
-        if (_speakingCts is not null || _coachBusy || _readyReply is not null ||
+        if (_speakingCts is not null || _translating || _coachBusy || _readyReply is not null ||
             load.CpuPercent >= 95 || now < _narrationGuard.BlockedUntil)
             return;
 
@@ -717,7 +742,7 @@ internal sealed class CoachForm : Form
         SetStatus(lesson.Title.StartsWith("AI 個人化", StringComparison.Ordinal)
             ? "空閒補充 · 個人化教材 · 已存本機避免重複"
             : "空閒補充 · 多益／數位 IC／遊戲英文備用教材");
-        SpeakLesson(lesson.English, lesson.Chinese);
+        SpeakLesson(lesson.English, LessonScript.Narrate(lesson));
     }
 
     private void SpeakLesson(string english, string chinese)
@@ -744,7 +769,9 @@ internal sealed class CoachForm : Form
         _keywordsLabel.Text = reply.Advice is null ? words : $"一般建議 · 非背包分析\n{reply.Advice}";
         SetStatus(reply.Notice ?? (reply.UsedLocalModel ? "任務與英文教學完成" : "本機基本教學"));
         _idleLessons.ObserveLesson(Environment.TickCount64, reply.Keywords, resetSchedule: false);
-        SpeakLesson(reply.SimpleEnglish, Narration(reply));
+        // Frame the quoted source before the explanation so late results do not
+        // sound like unrelated instructions. One complete speech paragraph.
+        SpeakLesson(reply.SimpleEnglish, $"{(reply.Original.StartsWith("QUEST ·") ? "目前任務說明" : "回顧剛才的英文")}。英文是：{reply.SimpleEnglish}。{Narration(reply)}");
     }
 
     private bool ShouldIncludeBuildTip()
@@ -1389,6 +1416,10 @@ internal sealed class CoachForm : Form
         _ = TranslateVisibleAsync("old sentence", false);
         _ = TranslateVisibleAsync("middle sentence", false);
         _ = TranslateVisibleAsync("new sentence", false);
+        ShowPartialTranslation(_translationVersion - 1, "舊片段不可顯示");
+        if (_chineseLabel.Text.Contains("舊片段")) return false;
+        ShowPartialTranslation(_translationVersion, "最新片段");
+        if (!_chineseLabel.Text.Contains("最新片段") || !_chineseLabel.Text.Contains("尚未完整")) return false;
         oldTranslation.SetResult(new("過期譯文", "test", 0));
         Application.DoEvents();
         if (_chineseLabel.Text == "過期譯文" || !translatedInputs.SequenceEqual(new[] { "old sentence", "new sentence" })) return false;

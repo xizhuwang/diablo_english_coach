@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace DiabloEnglishCoach;
 
-internal sealed record IdleLesson(string Title, string English, string Chinese, string Topic = "game");
+internal sealed record IdleLesson(string Title, string English, string Chinese, string Topic = "game", string SentenceMeaning = "");
 
 internal sealed record LessonPersonalizationContext(
     string Topic,
@@ -76,7 +76,7 @@ internal sealed class IdleLessonPlanner
     public IdleLessonPlanner(string? cachePath = null, bool persistGenerated = true)
     {
         _cachePath = persistGenerated
-            ? cachePath ?? Path.Combine(CoachConfig.FolderPath, "personalized-lessons.json")
+            ? cachePath ?? Path.Combine(CoachConfig.FolderPath, "personalized-lessons-v2.json")
             : null;
         LoadGenerated();
     }
@@ -177,6 +177,7 @@ internal sealed class IdleLessonPlanner
         else
             lesson = NextCurriculum(config);
 
+        lesson = LessonScript.Complete(lesson);
         Remember(lesson);
         return lesson;
     }
@@ -240,6 +241,7 @@ internal sealed class IdleLessonPlanner
         lesson.Title is { Length: > 0 and <= 40 } &&
         lesson.English is { Length: >= 3 and <= 180 } &&
         lesson.Chinese is { Length: >= 3 and <= 500 } &&
+        lesson.SentenceMeaning is { Length: >= 3 and <= 250 } &&
         lesson.Chinese.Any(character => character is >= '\u3400' and <= '\u9fff');
 
     private static string Signature(string value) => Regex.Replace(value.ToLowerInvariant(), @"[^a-z0-9]+", " ").Trim();

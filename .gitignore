@@ -19,6 +19,7 @@ publish-finish-paragraph/
 publish-guide-cache/
 publish-lite/
 publish-readable/
+publish-responsive/
 translation-live*.json
 teaching-live.json
 guide-source-test.html
