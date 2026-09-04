@@ -7,7 +7,7 @@ internal sealed class CoachForm : Form
     private readonly CoachConfig _config = CoachConfig.Load();
     private readonly OcrService _ocrService;
     private readonly CoachService _coachService = new();
-    private readonly SpeechService _speechService = new();
+    private readonly SpeechService _speechService;
     private readonly System.Windows.Forms.Timer _scanTimer = new();
     private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _translationCts;
@@ -28,10 +28,13 @@ internal sealed class CoachForm : Form
     private readonly Button _testButton = new();
     private readonly Button _speakEnglishButton = new();
     private readonly Button _speakChineseButton = new();
+    private readonly Button _voiceButton = new();
 
     public CoachForm()
     {
         _ocrService = new OcrService();
+        _speechService = new SpeechService(_config);
+        _speechService.StatusChanged += message => SetStatus(message);
         InitializeUi();
         _scanTimer.Interval = Math.Clamp(_config.ScanIntervalMs, 700, 5000);
         _scanTimer.Tick += ScanTimerTick;
@@ -92,7 +95,8 @@ internal sealed class CoachForm : Form
         ConfigureButton(_testButton, "測試辨識", async (_, _) => await TestCaptureAsync());
         ConfigureButton(_speakEnglishButton, "🔊 英文", (_, _) => _speechService.SpeakEnglish(_originalLabel.Text));
         ConfigureButton(_speakChineseButton, "🔊 中文", (_, _) => _speechService.SpeakTraditionalChinese(_chineseLabel.Text));
-        toolbar.Controls.AddRange(new Control[] { _startButton, _regionButton, _testButton, _speakEnglishButton, _speakChineseButton });
+        ConfigureButton(_voiceButton, "聲音設定", (_, _) => OpenVoiceSettings());
+        toolbar.Controls.AddRange(new Control[] { _startButton, _regionButton, _testButton, _speakEnglishButton, _speakChineseButton, _voiceButton });
         root.Controls.Add(toolbar, 0, 1);
 
         ConfigureContentLabel(_originalLabel, "等待英文字幕……", Color.WhiteSmoke, 11, FontStyle.Bold);
@@ -203,6 +207,11 @@ internal sealed class CoachForm : Form
         _keywordsLabel.Text = "正在找重點單字……";
         SetStatus("字幕已讀取；本機教練正在思考……");
 
+        // English can be spoken immediately because it does not depend on the
+        // local translation model. This removes the biggest perceived delay.
+        if (_config.SpeakEnglish)
+            _speechService.SpeakEnglish(text);
+
         _recentSentences.Enqueue(text);
         while (_recentSentences.Count > 12)
             _recentSentences.Dequeue();
@@ -228,9 +237,7 @@ internal sealed class CoachForm : Form
                 : string.Join("    ", reply.Keywords.Select(keyword => $"{keyword.Word}＝{keyword.Meaning}"));
             SetStatus(reply.Notice ?? (reply.UsedLocalModel ? $"完成 · {_config.Model} · 僅使用當前字幕" : "完成 · 基本離線模式"));
 
-            if (_config.SpeakEnglish)
-                _speechService.SpeakEnglish(reply.Original);
-            else if (_config.SpeakChinese)
+            if (_config.SpeakChinese)
                 _speechService.SpeakTraditionalChinese(reply.TraditionalChinese);
         }
         catch (OperationCanceledException)
@@ -289,6 +296,12 @@ internal sealed class CoachForm : Form
         await ScanOnceAsync(force: true);
         if (wasRunning)
             _scanTimer.Start();
+    }
+
+    private void OpenVoiceSettings()
+    {
+        using var settings = new VoiceSettingsForm(_config, _speechService);
+        settings.ShowDialog(this);
     }
 
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)

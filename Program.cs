@@ -12,6 +12,13 @@ internal static class Program
             return;
         }
 
+        if (args.Length >= 4 && args[0].Equals("--voice-sample", StringComparison.OrdinalIgnoreCase))
+        {
+            Environment.ExitCode = SelfTest.GenerateVoiceSampleAsync(
+                Path.GetFullPath(args[1]), args[2], args[3]).GetAwaiter().GetResult() ? 0 : 1;
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, eventArgs) =>

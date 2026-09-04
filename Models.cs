@@ -15,6 +15,13 @@ internal sealed class CoachConfig
     public bool SpeakEnglish { get; set; }
     public bool ShowOriginal { get; set; } = true;
     public bool ForceCpuInference { get; set; } = true;
+    public bool UseOnlineNeuralVoice { get; set; } = true;
+    public string ChineseVoice { get; set; } = "zh-TW-HsiaoYuNeural";
+    public string EnglishVoice { get; set; } = "en-US-AnaNeural";
+    public string LocalChineseVoice { get; set; } = "Microsoft Yating Desktop";
+    public string LocalEnglishVoice { get; set; } = "Microsoft Zira Desktop";
+    public int SpeechRatePercent { get; set; } = 18;
+    public int SpeechPitchHz { get; set; } = 4;
 
     public static string FolderPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

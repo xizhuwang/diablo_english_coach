@@ -44,8 +44,8 @@ Choose zero to three useful keywords that appear in the sentence. Do not continu
                 options = new
                 {
                     temperature = 0.1,
-                    num_ctx = 4096,
-                    num_predict = 240,
+                    num_ctx = 2048,
+                    num_predict = 160,
                     // Keep the MX330's 2 GB VRAM free for Diablo Immortal. The
                     // 2B coach model fits comfortably in system RAM on this PC.
                     num_gpu = config.ForceCpuInference ? 0 : -1

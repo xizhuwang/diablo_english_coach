@@ -1,10 +1,26 @@
 using System.Drawing.Imaging;
 using System.Text.Json;
+using EdgeTTS.DotNet;
 
 namespace DiabloEnglishCoach;
 
 internal static class SelfTest
 {
+    public static async Task<bool> GenerateVoiceSampleAsync(string outputPath, string voice, string text)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? Environment.CurrentDirectory);
+            var request = new Communicate(text, voice: voice, rate: "+18%", pitch: "+4Hz");
+            await request.SaveAsync(outputPath);
+            return File.Exists(outputPath) && new FileInfo(outputPath).Length > 1024;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static async Task<bool> RunAsync(string outputPath)
     {
         var checks = new Dictionary<string, object>();
