@@ -4,22 +4,30 @@ internal sealed class RegionPickerForm : Form
 {
     private readonly Bitmap _screenshot;
     private readonly Rectangle _initialSelection;
+    private readonly string _instruction;
     private Point _dragStart;
     private Rectangle _selection;
     private bool _dragging;
 
     public Rectangle SelectedImageRectangle { get; private set; }
 
-    public RegionPickerForm(Bitmap screenshot, CoachConfig config)
+    public RegionPickerForm(Bitmap screenshot, CoachConfig config, CaptureRegionKind kind)
     {
         _screenshot = (Bitmap)screenshot.Clone();
+        _instruction = kind == CaptureRegionKind.Dialogue
+            ? "拖曳框選英文對話字幕區   Enter：儲存   Esc：取消\n只框字幕，不要包含任務清單、聊天窗與技能列"
+            : "拖曳框選左側英文任務目標   Enter：儲存   Esc：取消\n只框任務名稱與目前目標，不要包含聊天窗";
+        var x = kind == CaptureRegionKind.Dialogue ? config.RegionX : config.QuestRegionX;
+        var y = kind == CaptureRegionKind.Dialogue ? config.RegionY : config.QuestRegionY;
+        var width = kind == CaptureRegionKind.Dialogue ? config.RegionWidth : config.QuestRegionWidth;
+        var height = kind == CaptureRegionKind.Dialogue ? config.RegionHeight : config.QuestRegionHeight;
         _initialSelection = new Rectangle(
-            (int)Math.Round(screenshot.Width * config.RegionX),
-            (int)Math.Round(screenshot.Height * config.RegionY),
-            (int)Math.Round(screenshot.Width * config.RegionWidth),
-            (int)Math.Round(screenshot.Height * config.RegionHeight));
+            (int)Math.Round(screenshot.Width * x),
+            (int)Math.Round(screenshot.Height * y),
+            (int)Math.Round(screenshot.Width * width),
+            (int)Math.Round(screenshot.Height * height));
 
-        Text = "框選英文字幕會出現的區域";
+        Text = kind == CaptureRegionKind.Dialogue ? "框選英文對話字幕區" : "框選英文任務目標區";
         WindowState = FormWindowState.Maximized;
         FormBorderStyle = FormBorderStyle.None;
         BackColor = Color.Black;
@@ -57,13 +65,12 @@ internal sealed class RegionPickerForm : Form
             eventArgs.Graphics.DrawRectangle(pen, _selection);
         }
 
-        var instruction = "拖曳框選英文字幕區域   Enter：儲存   Esc：取消\n只框字幕，不要包含任務清單、聊天窗與技能列";
         using var font = new Font("Microsoft JhengHei UI", 16, FontStyle.Bold);
-        var size = eventArgs.Graphics.MeasureString(instruction, font);
+        var size = eventArgs.Graphics.MeasureString(_instruction, font);
         var panel = new RectangleF(24, 24, size.Width + 28, size.Height + 22);
         using var panelBrush = new SolidBrush(Color.FromArgb(225, 20, 22, 28));
         eventArgs.Graphics.FillRectangle(panelBrush, panel);
-        eventArgs.Graphics.DrawString(instruction, font, Brushes.White, panel.X + 14, panel.Y + 10);
+        eventArgs.Graphics.DrawString(_instruction, font, Brushes.White, panel.X + 14, panel.Y + 10);
     }
 
     protected override void Dispose(bool disposing)

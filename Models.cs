@@ -8,6 +8,11 @@ internal sealed class CoachConfig
     public double RegionY { get; set; } = 0.58;
     public double RegionWidth { get; set; } = 0.76;
     public double RegionHeight { get; set; } = 0.30;
+    public double QuestRegionX { get; set; } = 0.005;
+    public double QuestRegionY { get; set; } = 0.20;
+    public double QuestRegionWidth { get; set; } = 0.22;
+    public double QuestRegionHeight { get; set; } = 0.23;
+    public bool QuestRegionConfigured { get; set; } = true;
     public int ScanIntervalMs { get; set; } = 1100;
     public string OllamaUrl { get; set; } = "http://127.0.0.1:11434";
     public string Model { get; set; } = "qwen3.5:2b-q4_K_M";
@@ -68,4 +73,10 @@ internal sealed record CoachReply(
 internal sealed record WindowInfo(nint Handle, string Title, Rectangle ClientBounds)
 {
     public override string ToString() => Title;
+}
+
+internal enum CaptureRegionKind
+{
+    Dialogue,
+    Quest
 }

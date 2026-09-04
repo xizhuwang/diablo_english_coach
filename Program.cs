@@ -25,6 +25,20 @@ internal static class Program
             Environment.Exit(SelfTest.CaptureUiPreview(Path.GetFullPath(args[1])) ? 0 : 1);
         }
 
+        if (args.Length >= 3 && args[0].Equals("--screenshot-test", StringComparison.OrdinalIgnoreCase))
+        {
+            Environment.ExitCode = SelfTest.TestScreenshotRegionsAsync(
+                Path.GetFullPath(args[1]), Path.GetFullPath(args[2])).GetAwaiter().GetResult() ? 0 : 1;
+            return;
+        }
+
+        if (args.Length >= 2 && args[0].Equals("--quest-coach-test", StringComparison.OrdinalIgnoreCase))
+        {
+            Environment.ExitCode = SelfTest.TestQuestCoachAsync(
+                Path.GetFullPath(args[1])).GetAwaiter().GetResult() ? 0 : 1;
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, eventArgs) =>

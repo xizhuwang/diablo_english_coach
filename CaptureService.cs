@@ -59,17 +59,21 @@ internal static class CaptureService
         return CaptureScreen(refreshed.ClientBounds);
     }
 
-    public static Bitmap CaptureRegion(WindowInfo window, CoachConfig config)
+    public static Bitmap CaptureRegion(WindowInfo window, CoachConfig config, CaptureRegionKind kind = CaptureRegionKind.Dialogue)
     {
         if (!TryRefresh(window, out var refreshed))
             throw new InvalidOperationException("遊戲視窗目前不可見，或已最小化。");
 
         var client = refreshed.ClientBounds;
+        var x = kind == CaptureRegionKind.Dialogue ? config.RegionX : config.QuestRegionX;
+        var y = kind == CaptureRegionKind.Dialogue ? config.RegionY : config.QuestRegionY;
+        var width = kind == CaptureRegionKind.Dialogue ? config.RegionWidth : config.QuestRegionWidth;
+        var height = kind == CaptureRegionKind.Dialogue ? config.RegionHeight : config.QuestRegionHeight;
         var rectangle = new Rectangle(
-            client.Left + (int)Math.Round(client.Width * config.RegionX),
-            client.Top + (int)Math.Round(client.Height * config.RegionY),
-            Math.Max(1, (int)Math.Round(client.Width * config.RegionWidth)),
-            Math.Max(1, (int)Math.Round(client.Height * config.RegionHeight)));
+            client.Left + (int)Math.Round(client.Width * x),
+            client.Top + (int)Math.Round(client.Height * y),
+            Math.Max(1, (int)Math.Round(client.Width * width)),
+            Math.Max(1, (int)Math.Round(client.Height * height)));
 
         return CaptureScreen(rectangle);
     }
