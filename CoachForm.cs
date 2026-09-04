@@ -211,7 +211,7 @@ internal sealed class CoachForm : Form
         _running = !_running;
         _startButton.Text = _running ? "Ⅱ" : "▶";
         _scanTimer.Enabled = _running;
-        SetStatus(_running ? "自動負載模式已啟用；操作中只記錄，空閒時再補充教學。" : "已暫停");
+        SetStatus(_running ? "自動負載模式已啟用；戰鬥按鍵時只記錄，空白鍵不會暫緩教學。" : "已暫停");
         if (_running)
             _ = ScanOnceAsync(force: false);
     }
@@ -659,6 +659,7 @@ internal sealed class CoachForm : Form
         _lifetimeCts.Cancel();
         _translationCts?.Cancel();
         _speechService.Dispose();
+        _loadMonitor.Dispose();
         _translationCts?.Dispose();
         _lifetimeCts.Dispose();
     }

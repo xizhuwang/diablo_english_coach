@@ -2,35 +2,38 @@ using System.Runtime.InteropServices;
 
 namespace DiabloEnglishCoach;
 
-internal readonly record struct LoadSnapshot(double CpuPercent, int InputIdleMs, bool ShouldDefer)
+internal readonly record struct LoadSnapshot(double CpuPercent, int ActionKeyIdleMs, bool ShouldDefer)
 {
-    public string Reason => InputIdleMs < AdaptiveLoadMonitor.ActiveInputThresholdMs
+    public string Reason => ActionKeyIdleMs < AdaptiveLoadMonitor.ActiveKeyThresholdMs
         ? "正在操作"
         : CpuPercent >= AdaptiveLoadMonitor.HighCpuThresholdPercent ? $"CPU {CpuPercent:F0}%" : "低負載";
 }
 
-internal sealed class AdaptiveLoadMonitor
+internal sealed class AdaptiveLoadMonitor : IDisposable
 {
-    internal const int ActiveInputThresholdMs = 2500;
+    internal const int ActiveKeyThresholdMs = 2500;
     internal const double HighCpuThresholdPercent = 72;
 
+    private readonly KeyboardActivityMonitor _keyboard = new();
     private ulong _previousIdle;
     private ulong _previousTotal;
     private bool _hasCpuSample;
 
     public LoadSnapshot Sample(bool coachBusy, bool explicitInteraction)
     {
-        var idleMs = ReadInputIdleMilliseconds();
+        var actionKeyIdleMs = _keyboard.ActionKeyIdleMilliseconds;
         var cpuPercent = ReadCpuPercent();
         return new LoadSnapshot(
             cpuPercent,
-            idleMs,
-            ShouldDefer(cpuPercent, idleMs, coachBusy, explicitInteraction));
+            actionKeyIdleMs,
+            ShouldDefer(cpuPercent, actionKeyIdleMs, coachBusy, explicitInteraction));
     }
 
-    internal static bool ShouldDefer(double cpuPercent, int inputIdleMs, bool coachBusy, bool explicitInteraction) =>
+    internal static bool ShouldDefer(double cpuPercent, int actionKeyIdleMs, bool coachBusy, bool explicitInteraction) =>
         !explicitInteraction &&
-        (coachBusy || inputIdleMs < ActiveInputThresholdMs || cpuPercent >= HighCpuThresholdPercent);
+        (coachBusy || actionKeyIdleMs < ActiveKeyThresholdMs || cpuPercent >= HighCpuThresholdPercent);
+
+    public void Dispose() => _keyboard.Dispose();
 
     private double ReadCpuPercent()
     {
@@ -56,15 +59,6 @@ internal sealed class AdaptiveLoadMonitor
         return Math.Clamp((totalDelta - idleDelta) * 100d / totalDelta, 0, 100);
     }
 
-    private static int ReadInputIdleMilliseconds()
-    {
-        var info = new LastInputInfo { Size = (uint)Marshal.SizeOf<LastInputInfo>() };
-        if (!GetLastInputInfo(ref info))
-            return int.MaxValue;
-        var elapsed = unchecked((uint)Environment.TickCount - info.TickCount);
-        return elapsed > int.MaxValue ? int.MaxValue : (int)elapsed;
-    }
-
     private static ulong ToUInt64(NativeFileTime value) => ((ulong)value.High << 32) | value.Low;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -74,18 +68,58 @@ internal sealed class AdaptiveLoadMonitor
         public uint High;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LastInputInfo
-    {
-        public uint Size;
-        public uint TickCount;
-    }
-
     [DllImport("kernel32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetSystemTimes(out NativeFileTime idle, out NativeFileTime kernel, out NativeFileTime user);
 
+}
+
+internal sealed class KeyboardActivityMonitor : IDisposable
+{
+    internal const int SpaceVirtualKey = 0x20;
+    private const int FirstKeyboardVirtualKey = 0x08;
+    private const int LastKeyboardVirtualKey = 0xFE;
+    private readonly System.Threading.Timer _timer;
+    private long _lastActionKeyTick = Environment.TickCount64 - AdaptiveLoadMonitor.ActiveKeyThresholdMs;
+
+    public KeyboardActivityMonitor()
+    {
+        // Polling avoids global keyboard hooks. No key code or text is retained;
+        // only the time of the latest non-Space keyboard action is stored.
+        _timer = new System.Threading.Timer(PollKeyboard, null, 0, 60);
+    }
+
+    public int ActionKeyIdleMilliseconds
+    {
+        get
+        {
+            var elapsed = Environment.TickCount64 - Interlocked.Read(ref _lastActionKeyTick);
+            return elapsed >= int.MaxValue ? int.MaxValue : Math.Max(0, (int)elapsed);
+        }
+    }
+
+    internal static bool IsActionKey(int virtualKey) =>
+        virtualKey is >= FirstKeyboardVirtualKey and <= LastKeyboardVirtualKey &&
+        virtualKey != SpaceVirtualKey;
+
+    public void Dispose() => _timer.Dispose();
+
+    private void PollKeyboard(object? state)
+    {
+        for (var virtualKey = FirstKeyboardVirtualKey; virtualKey <= LastKeyboardVirtualKey; virtualKey++)
+        {
+            if (!IsActionKey(virtualKey))
+                continue;
+            var keyState = GetAsyncKeyState(virtualKey);
+            // Read only the current down-state bit. Do not depend on or consume
+            // the unreliable "pressed since last call" transition bit.
+            if ((keyState & 0x8000) == 0)
+                continue;
+            Interlocked.Exchange(ref _lastActionKeyTick, Environment.TickCount64);
+            return;
+        }
+    }
+
     [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetLastInputInfo(ref LastInputInfo info);
+    private static extern short GetAsyncKeyState(int virtualKey);
 }
