@@ -179,6 +179,13 @@ internal static class SelfTest
             checks["model_json_parses"] = parsed.UsedLocalModel && parsed.TraditionalChinese == "擊敗不死族。";
             checks["unknown_keyword_filtered"] = parsed.Keywords.Count == 1 && parsed.Keywords[0].Word == "defeat";
 
+            var sampledLoad = new AdaptiveLoadMonitor().Sample(coachBusy: false, explicitInteraction: false);
+            checks["adaptive_load_sample_valid"] = sampledLoad.CpuPercent is >= 0 and <= 100 && sampledLoad.InputIdleMs >= 0;
+            checks["adaptive_load_defers_input"] = AdaptiveLoadMonitor.ShouldDefer(20, 500, false, false);
+            checks["adaptive_load_defers_high_cpu"] = AdaptiveLoadMonitor.ShouldDefer(85, 5000, false, false);
+            checks["adaptive_load_resumes_when_idle"] = !AdaptiveLoadMonitor.ShouldDefer(30, 5000, false, false);
+            checks["explicit_interaction_starts_immediately"] = !AdaptiveLoadMonitor.ShouldDefer(90, 100, true, true);
+
             var passed = checks.Values.OfType<bool>().All(value => value);
             checks["passed"] = passed;
             Write(outputPath, checks);

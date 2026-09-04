@@ -14,6 +14,7 @@ internal sealed class CoachConfig
     public double QuestRegionHeight { get; set; } = 0.23;
     public bool QuestRegionConfigured { get; set; } = true;
     public int ScanIntervalMs { get; set; } = 1100;
+    public int BusyScanIntervalMs { get; set; } = 2800;
     public string OllamaUrl { get; set; } = "http://127.0.0.1:11434";
     public string Model { get; set; } = "qwen3.5:2b-q4_K_M";
     public bool SpeakChinese { get; set; } = true;
