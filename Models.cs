@@ -9,6 +9,8 @@ internal sealed class CoachConfig
     public double RegionWidth { get; set; } = 0.46;
     public double RegionHeight { get; set; } = 0.24;
     public bool OnlineTranslationEnabled { get; set; }
+    public string TranslationProvider { get; set; } = TranslationProviders.LocalOllama;
+    public string TranslationModel { get; set; } = "qwen3.5:0.8b";
     public string AzureTranslatorRegion { get; set; } = "";
     public int OverlayLayoutVersion { get; set; }
     public double QuestRegionX { get; set; } = 0.005;
@@ -70,6 +72,13 @@ internal sealed class CoachConfig
         Directory.CreateDirectory(FolderPath);
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
+}
+
+internal static class TranslationProviders
+{
+    public const string LocalOllama = "LocalOllama";
+    public const string Azure = "Azure";
+    public const string Disabled = "Disabled";
 }
 
 internal sealed record KeywordCard(string Word, string Meaning);

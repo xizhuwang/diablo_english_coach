@@ -21,6 +21,8 @@ internal static class FastTranslationSelfTest
         var hallucination = CoachService.ParseModelReply("Search for Leoric", """{"simple_english":"Look for the boss","traditional_chinese":"尋找頭領","keywords":[]}""");
         checks["invented_boss_is_not_spoken"] = !hallucination.UsedLocalModel && !hallucination.TraditionalChinese.Contains("頭領");
         checks["dialogue_not_interpreted_as_quest"] = FastTranslationService.TryLocal("Head to the gate", false) is null;
+        checks["local_translation_cleans_game_terms"] = FastTranslationService.CleanLocalModelReply(
+            "The skill deals damage to the undead.", "翻譯：技術會對不死之人造成損害。") == "技能會對不死族造成傷害。";
         checks["busy_model_one_thread"] = AdaptiveLoadMonitor.InferenceBudget(new(30, 0, true), 8) == 1;
         checks["idle_model_four_threads"] = AdaptiveLoadMonitor.InferenceBudget(new(30, 5000, false), 8) == 4;
         checks["high_cpu_one_thread"] = AdaptiveLoadMonitor.InferenceBudget(new(80, 5000, true), 8) == 1;
@@ -50,10 +52,16 @@ internal static class FastTranslationSelfTest
         {
             var handler = new FakeHandler();
             var path = Path.Combine(folder, "cache.json");
-            var azure = new CoachConfig { OnlineTranslationEnabled = true, AzureTranslatorRegion = "eastasia" };
+            var azure = new CoachConfig
+            {
+                TranslationProvider = TranslationProviders.Azure,
+                OnlineTranslationEnabled = true,
+                AzureTranslatorRegion = "eastasia"
+            };
             using (var service = new FastTranslationService(new HttpClient(handler), path, () => "test-secret"))
             {
-                var offline = await service.TranslateAsync("There is danger nearby.", false, new CoachConfig(), default);
+                var offline = await service.TranslateAsync("There is danger nearby.", false,
+                    new CoachConfig { TranslationProvider = TranslationProviders.Disabled }, default);
                 checks["offline_sends_nothing"] = handler.Calls == 0 && offline.Text is null;
                 await service.TranslateAsync("Visit www.gtopup.top for cheap gold", false, azure, default);
                 checks["ads_never_uploaded"] = handler.Calls == 0;
@@ -77,8 +85,28 @@ internal static class FastTranslationSelfTest
             }
             using (var reloaded = new FastTranslationService(new HttpClient(new FakeHandler()), path, () => null))
             {
-                var result = await reloaded.TranslateAsync("There is danger nearby.", false, new CoachConfig(), default);
+                var result = await reloaded.TranslateAsync("There is danger nearby.", false, azure, default);
                 checks["cache_survives_restart"] = result.Text == "附近有危險。";
+            }
+            var localHandler = new FakeLocalHandler();
+            var local = new CoachConfig
+            {
+                TranslationProvider = TranslationProviders.LocalOllama,
+                TranslationModel = "qwen3.5:0.8b",
+                OllamaUrl = "http://127.0.0.1:11434",
+                InferenceThreads = 1
+            };
+            using (var localService = new FastTranslationService(new HttpClient(localHandler),
+                Path.Combine(folder, "local.json"), () => null))
+            {
+                var result = await localService.TranslateAsync("The skill deals damage.", false, local, default);
+                var cached = await localService.TranslateAsync("The skill deals damage.", false, local, default);
+                checks["local_model_translation_and_cache"] = result.Text == "這個技能造成傷害。" &&
+                    cached.Text == result.Text && localHandler.Calls == 1;
+                checks["local_model_uses_loopback_only"] = localHandler.LastUri?.Host == "127.0.0.1" &&
+                    localHandler.LastUri.Port == 11434 && localHandler.LastUri.AbsolutePath == "/api/chat";
+                checks["local_model_prompt_has_game_glossary"] = localHandler.LastBody.Contains("summons") &&
+                    localHandler.LastBody.Contains("qwen3.5:0.8b");
             }
             var blockedHandler = new FakeHandler { Status = HttpStatusCode.TooManyRequests };
             using (var blocked = new FastTranslationService(new HttpClient(blockedHandler), Path.Combine(folder, "blocked.json"), () => "key"))
@@ -119,14 +147,24 @@ internal static class FastTranslationSelfTest
         config.OnlineTranslationEnabled = true;
         var results = new List<object>();
         var passed = true;
-        foreach (var text in new[] { "Head Forward and Search for Leoric.", "This effect increases the damage dealt by your summons.", "I need your help. Follow me and stay close.", "This effect increases the damage dealt by your summons." })
+        var samples = new (string Text, bool Quest)[]
         {
-            var result = await service.TranslateAsync(text, true, config, default);
+            ("Head Forward and Search for Leoric.", true),
+            ("This effect increases the damage dealt by your summons.", false),
+            ("I need your help. Follow me and stay close.", false),
+            ("This shield absorbs damage, but it does not restore your health.", false),
+            ("Compare the two items before you replace your equipment.", false),
+            ("The skill is not ready yet. Wait for the cooldown to end.", false),
+            ("This shield absorbs damage, but it does not restore your health.", false)
+        };
+        foreach (var sample in samples)
+        {
+            var result = await service.TranslateAsync(sample.Text, sample.Quest, config, default);
             passed &= !string.IsNullOrWhiteSpace(result.Text);
-            results.Add(new { English = text, result.Text, result.Source, result.ElapsedMs });
+            results.Add(new { English = sample.Text, result.Text, result.Source, result.ElapsedMs });
         }
         await File.WriteAllTextAsync(outputPath, JsonSerializer.Serialize(results, new JsonSerializerOptions { WriteIndented = true }));
-        return passed && results.Count == 4;
+        return passed && results.Count == samples.Length;
     }
 
     private sealed class FakeHandler : HttpMessageHandler
@@ -145,6 +183,23 @@ internal static class FastTranslationSelfTest
             LastRegion = request.Headers.GetValues("Ocp-Apim-Subscription-Region").Single();
             LastBody = await request.Content!.ReadAsStringAsync(token);
             return new HttpResponseMessage(Status) { Content = new StringContent(Body) };
+        }
+    }
+
+    private sealed class FakeLocalHandler : HttpMessageHandler
+    {
+        public int Calls;
+        public Uri? LastUri;
+        public string LastBody = "";
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Calls++;
+            LastUri = request.RequestUri;
+            LastBody = await request.Content!.ReadAsStringAsync(token);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"message":{"content":"這個技能造成傷害。"}}""")
+            };
         }
     }
 }

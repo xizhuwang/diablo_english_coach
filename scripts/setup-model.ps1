@@ -14,7 +14,8 @@ function Find-Ollama {
 }
 
 Write-Host 'Diablo English Coach - local model setup' -ForegroundColor Yellow
-Write-Host 'This installs Ollama and downloads about 2 GB for the coach model.'
+$sizeText = if ($Model -eq 'qwen3.5:0.8b') { 'about 1 GB for the fast translation model' } else { 'about 2 GB for the coach model' }
+Write-Host "This installs Ollama and downloads $sizeText."
 Write-Host ''
 
 $ollamaPath = Find-Ollama

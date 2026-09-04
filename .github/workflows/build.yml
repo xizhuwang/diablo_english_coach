@@ -28,6 +28,7 @@ jobs:
           Copy-Item README.md dist/README.md
           Copy-Item 啟動英文教練.cmd dist/啟動英文教練.cmd
           Copy-Item 安裝本機模型.cmd dist/安裝本機模型.cmd
+          Copy-Item 安裝本機翻譯.cmd dist/安裝本機翻譯.cmd
           Copy-Item 安裝口說模型.ps1 dist/安裝口說模型.ps1
           New-Item -ItemType Directory -Force dist/scripts | Out-Null
           Copy-Item scripts/setup-model.ps1 dist/scripts/setup-model.ps1

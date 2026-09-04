@@ -253,6 +253,25 @@ internal sealed class CoachForm : Form
         var model = await _coachService.CheckAsync(_config, _lifetimeCts.Token);
         var game = _gameWindow is null ? "尚未找到 Diablo Immortal 視窗" : "已找到遊戲視窗";
         SetStatus($"{game} · {model.Message}");
+        if (_config.TranslationProvider == TranslationProviders.LocalOllama)
+            _ = WarmLocalTranslationAsync();
+    }
+
+    private async Task WarmLocalTranslationAsync()
+    {
+        if (_translating || IsDisposed) return;
+        _translating = true;
+        try { await _fastTranslation.TranslateAsync("Ready.", false, _config, _lifetimeCts.Token); }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            _translating = false;
+            if (_queuedTranslation is { } waiting && _running && !IsDisposed)
+            {
+                _queuedTranslation = null;
+                _ = TranslateVisibleAsync(waiting.Text, waiting.Quest);
+            }
+        }
     }
 
     private void ToggleRunning()
@@ -301,6 +320,7 @@ internal sealed class CoachForm : Form
         try
         {
             var load = _loadMonitor.Sample(false);
+            _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
             _scanTimer.Interval = load.CpuPercent >= 85 ? 2000 : load.ShouldDefer ? 1100 : 700;
             if (_gameWindow is null || !CaptureService.TryRefresh(_gameWindow, out var refreshed))
             {
@@ -528,13 +548,19 @@ internal sealed class CoachForm : Form
                 if (!_running || IsDisposed || next.Version != _translationVersion) continue;
                 _translationText = result.Text is { Length: > 0 }
                     ? result.Text : $"{result.Source} · {next.Text}";
-                if (result.Text is null && _config.OnlineTranslationEnabled && AzureCredentialStore.Exists())
+                var retryLocal = _config.TranslationProvider == TranslationProviders.LocalOllama &&
+                    result.Source.Contains("未啟動或超過", StringComparison.Ordinal);
+                var retryAzure = _config.TranslationProvider == TranslationProviders.Azure &&
+                    _config.OnlineTranslationEnabled && AzureCredentialStore.Exists();
+                if (result.Text is null && (retryLocal || retryAzure))
                 {
                     _retryTranslation = (next.Text, next.Quest);
                     _translationRetryAt = Environment.TickCount64 + 60_000;
                 }
                 if (_speakingCts is null) _chineseLabel.Text = _translationText;
-                SetStatus($"翻譯：{result.Source} · {result.ElapsedMs} ms · 本次啟動送出 {_fastTranslation.CharactersUsed} 字元");
+                SetStatus(_config.TranslationProvider == TranslationProviders.Azure
+                    ? $"翻譯：{result.Source} · {result.ElapsedMs} ms · 本次啟動送出 {_fastTranslation.CharactersUsed} 字元"
+                    : $"翻譯：{result.Source} · {result.ElapsedMs} ms · 沒有上傳文字");
             }
         }
         catch (OperationCanceledException) { }
@@ -730,7 +756,7 @@ internal sealed class CoachForm : Form
         menu.Items.Add(recognition);
 
         menu.Items.Add("聲音與語速", null, (_, _) => OpenVoiceSettings());
-        menu.Items.Add($"Azure Translator F0 設定（{(AzureCredentialStore.Exists() ? "已保存金鑰" : "尚未設定") }）",
+        menu.Items.Add($"翻譯方式（{(_config.TranslationProvider == TranslationProviders.Azure ? "Azure" : "本機")}）",
             null, (_, _) => OpenTranslationSettings());
         menu.Items.Add("本機流派資料／更新狀態", null, (_, _) => ShowBuildGuideDetails());
         menu.Items.Add("完整翻譯／運作狀態（精簡語音版）", null, (_, _) =>
@@ -1213,9 +1239,18 @@ internal sealed class CoachForm : Form
                 return false;
             if (!_settingsMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "本機流派資料／更新狀態"))
                 return false;
+            if (!_settingsMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "翻譯方式（本機）"))
+                return false;
             _settingsMenu!.Close();
             Application.DoEvents();
             if (_settingsOpen || _settingsMenu.IsDisposed)
+                return false;
+        }
+        using (var translationSettings = new TranslationSettingsForm(new CoachConfig()))
+        {
+            var radios = Descendants(translationSettings).OfType<RadioButton>().ToArray();
+            if (!radios.Any(item => item.Checked && item.Text.Contains("本機快速翻譯")) ||
+                !radios.Any(item => item.Text.Contains("Azure Translator")))
                 return false;
         }
         ToggleRunning();

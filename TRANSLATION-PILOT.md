@@ -40,11 +40,15 @@
 | shard | 堅硬之人 | 遊戲中應是碎片 |
 | skill | 技術 | 遊戲 UI 應是技能 |
 
-較大的 [NLLB-200 distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M) 權重約 2.46 GB（float32），模型卡為 CC-BY-NC 4.0；對這台同時執行遊戲的筆電而言成本較高，也不適合作為這個可公開發布專案的預設翻譯元件。綜合速度、品質、記憶體與授權，本機翻譯沒有進入正式主流程；測試模型與套件保留在 git 忽略的 `.local-translation`，不進發布包或 GitHub。
+較大的 [NLLB-200 distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M) 權重約 2.46 GB（float32），模型卡為 CC-BY-NC 4.0；對這台同時執行遊戲的筆電而言成本較高，也不適合作為這個可公開發布專案的預設翻譯元件。Argos 測試模型與套件保留在 git 忽略的 `.local-translation`，不進發布包或 GitHub。
 
-## 正式採用方式
+## 正式採用方式：Ollama 小模型
 
-主流程改為 Azure Translator 官方 API：常見任務先以本機規則立即處理，複雜句才送 Azure；譯文與模型教學決策各自保存本機快取。API 金鑰只進 Windows 認證管理員。自動測試以假的 HTTP 回應驗證端點、標頭、快取與退避，不消耗額度；仍需使用者自己的 F0 金鑰才能做實際端到端測試。
+考量 Azure 設定成本後，主流程改為 [Ollama `qwen3.5:0.8b`](https://ollama.com/library/qwen3.5:0.8b)，Azure 只保留為選用備援。模型約 1 GB，不需帳號或金鑰，請求只到 `127.0.0.1`；常見任務與已知易錯句先由本機規則直接處理，其他句子使用固定 Diablo 詞彙表提示與輸出校正。
+
+本機實測：第一次冷載入約 4.7 秒；保持載入且使用 4 個 CPU 執行緒時，代表性短句約 0.9～1.5 秒。戰鬥忙碌模式刻意限制為 1 個執行緒，一句新測試約 5.3 秒，換取較低遊戲干擾；對話期間通常沒有持續戰鬥鍵，會回到較快的執行緒預算。`Defeat the undead and find the shard`、護盾／生命值、比較裝備、技能冷卻等句子可用；0.8B 對 `I need your help. Follow me and stay close.` 曾產生不自然譯文，因此這個常見句已改由固定規則處理。重複句從快取讀取不到 1 ms。這不是完整品質基準，遊戲專名與少見長句仍可能需要看英文原文核對。
+
+譯文與 2B 教練的決策各自保存本機快取。自動測試以假的 HTTP 回應驗證 loopback、模型、詞彙校正、快取及 Azure 備援；另用已安裝的真實 0.8B 模型進行上述小規模端到端測試。
 
 ## 本機攻略更新實測
 
