@@ -35,8 +35,8 @@ internal sealed class CoachConfig
     public string LocalEnglishVoice { get; set; } = "Microsoft Zira Desktop";
     public int SpeechRatePercent { get; set; } = 0;
     public int ExperienceVersion { get; set; }
-    public int TeachingPauseSeconds { get; set; } = 12;
-    public int SpeakingIntervalSeconds { get; set; } = 90;
+    public int TeachingPauseSeconds { get; set; } = 6;
+    public int SpeakingIntervalSeconds { get; set; } = 60;
     public int SpeechPitchHz { get; set; } = 4;
     public double WindowOpacity { get; set; } = 0.80;
     public int WindowLeft { get; set; } = -1;

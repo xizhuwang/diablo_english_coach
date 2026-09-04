@@ -3,7 +3,11 @@ name: Build Windows coach
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,10 +18,6 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      - name: Download verified offline speaking model
-        shell: pwsh
-        run: ./安裝口說模型.ps1
-
       - name: Publish self-contained app
         shell: pwsh
         run: dotnet publish -c Release -r win-x64 --self-contained true -o dist/app
@@ -26,15 +26,36 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item README.md dist/README.md
+          Copy-Item PRIVACY.md dist/PRIVACY.md
+          Copy-Item THIRD-PARTY-NOTICES.md dist/THIRD-PARTY-NOTICES.md
+          Copy-Item licenses dist/licenses -Recurse
           Copy-Item 啟動英文教練.cmd dist/啟動英文教練.cmd
+          Copy-Item 安裝並啟動.cmd dist/安裝並啟動.cmd
           Copy-Item 安裝本機模型.cmd dist/安裝本機模型.cmd
           Copy-Item 安裝本機翻譯.cmd dist/安裝本機翻譯.cmd
           Copy-Item 安裝口說模型.ps1 dist/安裝口說模型.ps1
           New-Item -ItemType Directory -Force dist/scripts | Out-Null
           Copy-Item scripts/setup-model.ps1 dist/scripts/setup-model.ps1
+          Copy-Item scripts/setup-all.ps1 dist/scripts/setup-all.ps1
+
+      - name: Verify one-click package layout
+        shell: pwsh
+        run: ./dist/scripts/setup-all.ps1 -PackageRoot ./dist -VerifyOnly
+
+      - name: Create release archive
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: Compress-Archive -Path dist\* -DestinationPath Game-English-Coach-Windows-x64.zip
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" Game-English-Coach-Windows-x64.zip --generate-notes
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Diablo-English-Coach-Windows-x64
+          name: Game-English-Coach-Windows-x64
           path: dist
           if-no-files-found: error

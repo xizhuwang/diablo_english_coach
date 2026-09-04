@@ -8,7 +8,7 @@ if (Test-Path -LiteralPath $targetPath) {
     if ((Test-Path -LiteralPath (Join-Path $targetPath 'am/final.mdl')) -and
         (Test-Path -LiteralPath (Join-Path $targetPath 'conf/model.conf'))) {
         Write-Host "口說模型已存在：$targetPath"
-        exit 0
+        return
     }
     throw "模型目錄不完整。請先將此資料夾重新命名備份，再重試：$targetPath"
 }

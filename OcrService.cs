@@ -85,8 +85,19 @@ internal sealed partial class OcrService
             WordRegex().Matches(text).Count >= 5;
     }
 
-    internal static bool IsChatOrAdvertising(string text) =>
-        Regex.IsMatch(text, @"https?\s*:|www\s*\.|\burl\s*[:>]|\b[\w-]+\.(?:com|top|net|gg)\b|\[\s*\d+\s*\]|\b(?:discount|cheap|delivery|consultation|quantity)\b|\b(?:platinum|eternal\s*orbs)\b.*[$＄]|[$＄].*\b(?:platinum|eternal\s*orbs)\b", RegexOptions.IgnoreCase);
+    internal static bool IsChatOrAdvertising(string text)
+    {
+        if (Regex.IsMatch(text, @"https?\s*:|www\s*\.|\burl\s*[:>]|\b[\w-]+\.(?:com|top|net|gg)\b|\b(?:discount|cheap|consultation|large\s+quantity)\b", RegexOptions.IgnoreCase))
+            return true;
+        // Diablo chat usually begins with a bracketed channel number/name. Drop
+        // those lines before translation; a speaker such as "Cain:" remains.
+        if (Regex.IsMatch(text, @"^\s*\[(?:\s*\d+\s*|world|zone|trade|party|clan)\]", RegexOptions.IgnoreCase))
+            return true;
+        // Catch cropped trade messages only when a commerce word and a currency
+        // or buy/sell marker occur together. Do not discard story uses of buy.
+        return Regex.IsMatch(text, @"\b(?:WTS|WTB|selling|buying|eternal\s*orbs?|platinum)\b", RegexOptions.IgnoreCase) &&
+            Regex.IsMatch(text, @"[$＄€£]|\b(?:price|USD|TWD|NTD|cheap|discount|orbs?|platinum|WTS|WTB)\b", RegexOptions.IgnoreCase);
+    }
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();

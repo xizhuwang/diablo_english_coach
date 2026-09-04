@@ -24,18 +24,22 @@ internal static class ExperienceSelfTest
             ["dialogue_detects_question"] = OcrService.LooksLikeCharacterDialogue("Where is the shard?"),
             ["dialogue_ignores_action_button"] = !OcrService.LooksLikeCharacterDialogue("Leave Mad King's Breach"),
             ["dialogue_ignores_quest_imperative"] = !OcrService.LooksLikeCharacterDialogue("Head forward and search for Leoric"),
+            ["ocr_filters_numbered_trade_channel"] = OcrService.IsChatOrAdvertising("[1] player: anyone selling gems?"),
+            ["ocr_filters_cropped_trade_offer"] = OcrService.IsChatOrAdvertising("WTS 1000 Platinum $4.99"),
+            ["ocr_keeps_story_purchase"] = !OcrService.IsChatOrAdvertising("We must buy medicine for the wounded."),
             ["speaking_moderate_load_allowed"] = SpeakingPlanner.CanStart(true, true, false, 60, 9000, 9000, 9000),
             ["speaking_recent_action_blocked"] = !SpeakingPlanner.CanStart(true, true, false, 30, 500, 9000, 9000)
         };
         var planner = new SpeakingPlanner { IntervalMilliseconds = 45_000 };
         planner.Reset(0, initial: true);
-        planner.TryNext(27_000, true, true);
-        var first = planner.TryNext(30_000, true, true);
-        planner.TryNext(72_000, true, true);
-        var second = planner.TryNext(75_000, true, true);
-        tests["speaking_first_invitation_thirty_seconds"] = first is not null && !first.Recall;
+        tests["speaking_reserves_next_audio_boundary"] = planner.ReserveNextBoundary(4_000, true) && !planner.ReserveNextBoundary(3_000, true);
+        planner.TryNext(9_000, true, true);
+        var first = planner.TryNext(12_000, true, true);
+        planner.TryNext(54_000, true, true);
+        var second = planner.TryNext(57_000, true, true);
+        tests["speaking_first_invitation_twelve_seconds"] = first is not null && !first.Recall;
         tests["speaking_second_is_active_recall"] = second is { Recall: true };
-        tests["speaking_configurable_interval"] = planner.RemainingMs(75_000) == 45_000;
+        tests["speaking_configurable_interval"] = planner.RemainingMs(57_000) == 45_000;
         return tests;
     }
 }

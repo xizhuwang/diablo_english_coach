@@ -3,7 +3,8 @@ using System.Text.RegularExpressions;
 namespace DiabloEnglishCoach;
 
 internal sealed record GameWordLink(string Word, string Pattern, string English, string Meaning,
-    string Usage, string Extension = "", string ExtensionTopic = "toeic");
+    string Usage, string Extension = "", string ExtensionTopic = "toeic",
+    string ExtensionEnglish = "", string ExtensionMeaning = "");
 
 // A lexical connection is required; combat is NOT an excuse to teach arbitrary
 // engineering concepts. In particular, cooldown is never equated with setup time.
@@ -13,28 +14,36 @@ internal static class GameContextLessons
     [
         new("increase", @"increas(?:e|es|ed|ing)", "This effect increases skill damage.",
             "這個效果會增加技能傷害。", "increase 是增加；先看它增加的是哪個數值。",
-            "這個字也常出現在多益：increase sales 是增加銷售額。動詞相同，後面的對象不同。"),
+            "increase sales 是增加銷售額；遊戲和職場都是『提高某個數值』。", "toeic",
+            "Sales increased significantly this quarter.", "本季銷售額顯著增加。"),
         new("compare", @"compar(?:e|es|ed|ing)", "Compare the two items.", "比較這兩件物品。",
             "compare 是比較，選裝時要看屬性和技能效果。",
-            "工作上也會說 compare prices，比較價格；還是同一個 compare。"),
+            "compare prices 是比較價格；先找 compare 後面的兩個對象。", "toeic",
+            "Please compare the available plans.", "請比較現有的方案。"),
         new("require", @"requir(?:e|es|ed|ing)", "This item requires a higher level.", "這件物品需要更高的等級。",
             "requires 後面是必要條件；不符合條件時通常還不能使用。",
-            "多益職缺裡的 require experience 是需要經驗，也是指出必要條件。"),
+            "require experience 是需要經驗；require 後面接必要條件。", "toeic",
+            "The position requires relevant experience.", "這個職位需要相關經驗。"),
         new("available", @"available", "The skill is available now.", "現在可以使用這個技能。",
             "available 表示現在可用；有 not 時意思就相反。",
-            "工作上說 a room is available，是房間可使用；核心意思一樣是可用。"),
+            "a room is available 表示房間可以使用；核心意思仍是『可用』。", "toeic",
+            "The conference room is available this afternoon.", "會議室今天下午可以使用。"),
         new("confirm", @"confirm(?:s|ed|ing)?", "Confirm your choice.", "確認你的選擇。",
             "confirm 是確認；按介面上的確認鍵前，先看清楚選擇。",
-            "郵件中的 confirm the time 是確認時間；和確認遊戲選擇是同一種用法。"),
+            "confirm the schedule 是確認時程；和確認遊戲選擇是同一種用法。", "toeic",
+            "Please confirm the delivery schedule.", "請確認交貨時程。"),
         new("avoid", @"avoid(?:s|ed|ing)?", "Avoid the incoming attack.", "避開即將到來的攻擊。",
             "avoid 是避開，後面直接接要避開的事物。",
-            "多益裡也有 avoid delays，避免延誤；和避開攻擊共用 avoid。"),
+            "avoid delays 是避免延誤；和避開攻擊共用 avoid。", "toeic",
+            "Submit the form early to avoid delays.", "請提早交表格以避免延誤。"),
         new("return", @"return(?:s|ed|ing)?", "Return to the gate.", "回到大門。",
             "return to 表示回到某處。",
-            "工作上說 return to the office，就是回到辦公室；保留 return to 這個搭配。"),
+            "return the signed form 是交回簽好的表格；這裡 return 是及物動詞。", "toeic",
+            "Please return the signed form by Friday.", "請在星期五前交回簽好的表格。"),
         new("reset", @"reset(?:s|ting)?", "Reset your skills.", "重置你的技能。",
             "reset 是重置，your skills 是你的技能。",
-            "數位 IC 也用 reset 表示重置，讓電路進入已知狀態。", "ic"),
+            "數位 IC 也用 reset 表示重置，讓電路進入已知狀態。", "ic",
+            "Reset places the design in a known state.", "重置會讓設計進入已知狀態。"),
         new("cooldown", @"cooldown", "Wait for the cooldown.", "等待冷卻時間結束。",
             "cooldown 是冷卻時間，技能還沒恢復時可先走位。"),
         new("damage", @"damage", "The skill deals area damage.", "這個技能會造成範圍傷害。",
@@ -58,7 +67,43 @@ internal static class GameContextLessons
         new("upgrade", @"upgrad(?:e|es|ed|ing)", "Upgrade your equipment.", "升級你的裝備。",
             "upgrade 是提升等級或品質，equipment 是裝備。"),
         new("leave", @"leav(?:e|es|ing)", "Leave the dungeon.", "離開地城。",
-            "leave 是離開，後面可直接接地點，不用加 to。")
+            "leave 是離開，後面可直接接地點，不用加 to。"),
+        new("complete", @"complet(?:e|es|ed|ing)", "Complete the current objective.", "完成目前的目標。",
+            "complete 是完成；先確認後面要完成的是任務、事件還是收集數量。",
+            "complete the survey 是完成問卷；多益常用 complete 加工作項目。", "toeic",
+            "Please complete the survey by Friday.", "請在星期五前完成問卷。"),
+        new("receive", @"receiv(?:e|es|ed|ing)", "You will receive a reward.", "你會獲得獎勵。",
+            "receive 是收到；遊戲裡後面常接 reward 或 item。",
+            "receive an email 是收到電子郵件；先找收到的東西。", "toeic",
+            "You will receive a confirmation email.", "你會收到一封確認信。"),
+        new("select", @"select(?:s|ed|ing)?", "Select one reward.", "選擇一項獎勵。",
+            "select 是選擇；後面的名詞是可選項目。",
+            "select an option 是選擇一個選項；介面與多益都常見。", "toeic",
+            "Select the preferred delivery option.", "請選擇偏好的配送方式。"),
+        new("provide", @"provid(?:e|es|ed|ing)", "This item provides extra armor.", "這件物品提供額外護甲。",
+            "provide 是提供；先看提供了什麼效果。",
+            "provide information 是提供資料；provide 後面接提供的內容。", "toeic",
+            "Please provide the requested information.", "請提供要求的資料。"),
+        new("replace", @"replac(?:e|es|ed|ing)", "Replace the weaker item.", "替換較弱的物品。",
+            "replace 是替換；選裝時比較新舊裝備的核心效果。",
+            "replace damaged equipment 是更換損壞設備。", "toeic",
+            "We will replace the damaged equipment.", "我們會更換損壞的設備。"),
+        new("reduce", @"reduc(?:e|es|ed|ing)", "This effect reduces damage taken.", "這個效果會降低承受的傷害。",
+            "reduce 是降低；後面指出被降低的數值。",
+            "reduce costs 是降低成本；遊戲和職場都在描述數值下降。", "toeic",
+            "The new process reduces operating costs.", "新流程會降低營運成本。"),
+        new("collect", @"collect(?:s|ed|ing)?", "Collect the quest items.", "收集任務物品。",
+            "collect 是收集；任務後面通常會顯示物品和數量。",
+            "collect documents 是領取或收集文件。", "toeic",
+            "Please collect the documents at reception.", "請到接待處領取文件。"),
+        new("purchase", @"purchas(?:e|es|ed|ing)", "Purchase the item from the merchant.", "向商人購買物品。",
+            "purchase 是購買，比 buy 正式；先確認價格和物品。",
+            "purchase tickets 是購票；多益常見於通知和網站說明。", "toeic",
+            "Customers can purchase tickets online.", "顧客可以在線上購票。"),
+        new("improve", @"improv(?:e|es|ed|ing)", "Improve your main skill first.", "先強化你的主要技能。",
+            "improve 是改善或提升；後面接要改善的能力。",
+            "improve efficiency 是提升效率。", "toeic",
+            "The new process improves efficiency.", "新流程會提升效率。")
     ];
 
     public static IReadOnlyList<GameWordLink> Find(string dialogue, string quest) => Links.Where(link =>
@@ -70,8 +115,10 @@ internal static class GameContextLessons
     public static bool ContainsWord(string source, string word) => Links.FirstOrDefault(l => l.Word == word) is { } link &&
         Regex.IsMatch(source, @"\b(?:" + link.Pattern + @")\b", RegexOptions.IgnoreCase);
 
-    public static IdleLesson Create(GameWordLink link, bool extend) => new("從遊戲學英文", link.English,
-        link.Usage + (extend ? link.Extension : ""), extend ? link.ExtensionTopic : "game", link.Meaning, link.Word);
+    public static IdleLesson Create(GameWordLink link, bool extend) => extend && link.ExtensionEnglish.Length > 0
+        ? new("從遊戲延伸英文", link.ExtensionEnglish, link.Extension,
+            link.ExtensionTopic, link.ExtensionMeaning, link.Word)
+        : new("從遊戲學英文", link.English, link.Usage, "game", link.Meaning, link.Word);
 
     public static bool Allows(string word, string topic) => Links.Any(l => l.Word == word &&
         (topic == "game" || (l.Extension.Length > 0 && l.ExtensionTopic == topic)));

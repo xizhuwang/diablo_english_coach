@@ -28,7 +28,10 @@ internal sealed class CoachForm : Form
     private int _runVersion;
     private long _lastDialogueAt;
     private readonly NarrationGuard _narrationGuard = new();
-    private CoachReply? _readyReply;
+    // Prepared decisions are a small FIFO. Translation deliberately remains
+    // latest-only because an obsolete subtitle must never delay the live one.
+    private readonly Queue<CoachReply> _readyReplies = new();
+    private const int ReadyReplyLimit = 3;
     private Action? _retryRequest;
     private bool _speakingDemonstration;
     private bool _speakingProcessing;
@@ -99,6 +102,14 @@ internal sealed class CoachForm : Form
             _config.WindowLeft = _config.WindowTop = _config.WindowBottom = -1;
             _config.ExperienceVersion = 1;
         }
+        if (_config.ExperienceVersion < 2)
+        {
+            // Earlier builds waited 12 seconds and often let continuous lessons
+            // consume every safe speaking boundary.
+            _config.TeachingPauseSeconds = 6;
+            _config.SpeakingIntervalSeconds = 60;
+            _config.ExperienceVersion = 2;
+        }
         // Migrate only the old broad lower-screen ROI, which included public chat.
         if (_config.OverlayLayoutVersion < 2)
         {
@@ -138,7 +149,7 @@ internal sealed class CoachForm : Form
 
     private void InitializeUi()
     {
-        Text = "Diablo English Coach";
+        Text = "Game English Coach";
         StartPosition = FormStartPosition.Manual;
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
         var overlayWidth = Math.Min(area.Width - 20, _config.TranslationWidth > 0
@@ -301,7 +312,7 @@ internal sealed class CoachForm : Form
         }
         _transcript.Observe(playback, Environment.TickCount64);
         if (!playback.Playing && _transcript.Current?.Id == playback.Id)
-            _nextNarrationAt = Environment.TickCount64 + Math.Clamp(_config.TeachingPauseSeconds, 5, 40) * 1000;
+            _nextNarrationAt = Environment.TickCount64 + Math.Clamp(_config.TeachingPauseSeconds, 3, 30) * 1000;
         RefreshTranscript();
     }
 
@@ -401,7 +412,7 @@ internal sealed class CoachForm : Form
         _nextPersonalizationAt = Environment.TickCount64 + 8_000;
         _loadMonitor.SetEnabled(_running);
         _idleLessons.Reset(Environment.TickCount64);
-        _speakingPlanner.IntervalMilliseconds = Math.Clamp(_config.SpeakingIntervalSeconds, 45, 180) * 1000;
+        _speakingPlanner.IntervalMilliseconds = Math.Clamp(_config.SpeakingIntervalSeconds, 30, 150) * 1000;
         _speakingPlanner.Reset(Environment.TickCount64, initial: true);
         _nextNarrationAt = Environment.TickCount64 + 5_000;
         _speakingFaulted = false;
@@ -411,7 +422,7 @@ internal sealed class CoachForm : Form
             CancelPersonalization();
             _translationCts?.Cancel();
             _retryRequest = null;
-            _readyReply = null;
+            _readyReplies.Clear();
             _pendingDialogue = _pendingQuest = string.Empty;
             _speechService.Stop();
             _recentSentences.Clear();
@@ -481,10 +492,10 @@ internal sealed class CoachForm : Form
                 _narrationGuard.ObserveSpaceKey(Environment.TickCount64, _loadMonitor.DialogueKeyIdleMs);
                 HandleRecognizedText(dialogueText, CaptureRegionKind.Dialogue, load.ShouldDefer, load.Reason);
             }
-            // Quest objectives usually stay on screen much longer than dialogue.
-            // Reading them every third cycle keeps game-time CPU usage modest while
-            // still noticing a new objective within a few seconds.
-            var shouldScanQuest = force || _scanSequence++ % 6 == 0;
+            // Quest objectives persist much longer than dialogue. Read them only
+            // every twelfth cycle and accept only a real change; this keeps the
+            // left panel useful as context without repeatedly translating it.
+            var shouldScanQuest = force || _scanSequence++ % 12 == 0;
             var questText = _config.QuestRegionConfigured && shouldScanQuest
                 ? await RecognizeRegionAsync(CaptureRegionKind.Quest)
                 : string.Empty;
@@ -587,7 +598,8 @@ internal sealed class CoachForm : Form
                 _questCandidateCount = 1;
             }
 
-            if (_questCandidateCount >= 1 && !_recentQuests.Any(previous => Similar(previous, text) >= 0.97))
+            if (_questCandidateCount >= 1 && Similar(_currentQuest, text) < 0.90 &&
+                !_recentQuests.Any(previous => Similar(previous, text) >= 0.97))
                 AcceptQuest(text, deferCoaching, loadReason);
         }
 
@@ -644,7 +656,7 @@ internal sealed class CoachForm : Form
             {
                 var reply = new CoachReply($"QUEST · {quest}", quest, $"現在要做：{quick}",
                     Array.Empty<KeywordCard>(), false);
-                _readyReply = includeTip ? BuildAdvisor.AppendTip(reply, _config, quest, _buildGuides) : reply;
+                BufferReadyReply(includeTip ? BuildAdvisor.AppendTip(reply, _config, quest, _buildGuides) : reply);
                 return;
             }
             StartCoachRequest(
@@ -757,25 +769,29 @@ internal sealed class CoachForm : Form
         // Observe quiet time even while a lesson is playing; reserve the next
         // paragraph boundary for due speaking instead of starving it with lessons.
         if (TrySpeaking(load)) return;
-        var canSpeak = !load.ShouldDefer && NarrationMayStart() && now >= _nextNarrationAt;
+        var speakingReserved = _speakingPlanner.ReserveNextBoundary(now, _config.AutoSpeakingEnabled);
+        var canSpeak = !speakingReserved && !load.ShouldDefer && NarrationMayStart() && now >= _nextNarrationAt;
         if (canSpeak)
         {
-            if (_readyReply is { } ready)
+            if (TakeRelevantReadyReply() is { } ready)
             {
-                _readyReply = null;
-                if (ready.Original == _currentDialogue || ready.Original == _currentQuest || ready.Original == $"QUEST · {_currentQuest}")
-                    DisplayReply(ready);
+                DisplayReply(ready);
             }
             if (!_speechService.IsBusy) TryIdleLesson(load);
         }
 
-        if (_speakingCts is not null || _translating || _coachBusy || _readyReply is not null ||
+        if (_speakingCts is not null || _translating || _coachBusy ||
+            _readyReplies.Count >= ReadyReplyLimit || speakingReserved ||
             load.CpuPercent >= 95 || now < _narrationGuard.BlockedUntil)
             return;
 
         if (_pendingQuest.Length > 0 || _pendingDialogue.Length > 0 || _retryRequest is not null)
         {
-            if (now < _nextModelLessonAt || _personalizationBusy)
+            // A long paragraph is usable preparation time: after the previous
+            // request finishes, safely fill the next FIFO slot instead of idling
+            // until the normal decision interval. Never do this near a speaking
+            // invitation or while the load monitor asks us to defer.
+            if ((now < _nextModelLessonAt && (!_speechService.IsBusy || load.ShouldDefer)) || _personalizationBusy)
                 return;
             _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
             // A complex current-screen judgment is allowed sooner while idle.
@@ -882,11 +898,33 @@ internal sealed class CoachForm : Form
             _speechService.SpeakEnglish(english);
     }
 
+    private void BufferReadyReply(CoachReply reply)
+    {
+        // Keep decision/explanation results in completion order. A tiny bound is
+        // enough to use long speech as preparation time without creating a
+        // lecture backlog after combat or dialogue.
+        if (_readyReplies.Any(item => item.Original == reply.Original)) return;
+        while (_readyReplies.Count >= ReadyReplyLimit) _readyReplies.Dequeue();
+        _readyReplies.Enqueue(reply);
+    }
+
+    private CoachReply? TakeRelevantReadyReply()
+    {
+        while (_readyReplies.Count > 0)
+        {
+            var reply = _readyReplies.Dequeue();
+            if (reply.Original == _currentDialogue || reply.Original == _currentQuest ||
+                reply.Original == $"QUEST · {_currentQuest}")
+                return reply;
+        }
+        return null;
+    }
+
     private void DisplayReply(CoachReply reply)
     {
         if (_speechService.IsBusy || Environment.TickCount64 < _nextNarrationAt)
         {
-            _readyReply = reply;
+            BufferReadyReply(reply);
             return;
         }
         _originalLabel.Text = reply.Original;
@@ -946,7 +984,7 @@ internal sealed class CoachForm : Form
                 return;
             _retryRequest = null;
             // Do not speak a finished result over newly started combat/dialogue.
-            _readyReply = reply; // The teaching timer owns cadence, not request completion.
+            BufferReadyReply(reply); // The teaching timer owns cadence, not request completion.
         }
         catch (OperationCanceledException)
         {
@@ -1006,7 +1044,7 @@ internal sealed class CoachForm : Form
         menu.Items.Add(transcript);
         menu.Items.Add("教練逐字稿／最近 30 段", null, (_, _) => ShowTranscriptHistory());
         var cadence = new ToolStripMenuItem("教練節奏（講完後的停頓）");
-        foreach (var seconds in new[] { 8, 12, 25 })
+        foreach (var seconds in new[] { 4, 6, 10 })
         {
             var item = new ToolStripMenuItem($"{seconds} 秒") { Checked = _config.TeachingPauseSeconds == seconds };
             item.Click += (_, _) => { _config.TeachingPauseSeconds = seconds; _config.Save(); _nextNarrationAt = Environment.TickCount64 + seconds * 1000; };
@@ -1014,7 +1052,7 @@ internal sealed class CoachForm : Form
         }
         menu.Items.Add(cadence);
         var speakingFrequency = new ToolStripMenuItem("口說邀請間隔");
-        foreach (var seconds in new[] { 45, 90, 150 })
+        foreach (var seconds in new[] { 30, 60, 120 })
         {
             var item = new ToolStripMenuItem($"{seconds} 秒") { Checked = _config.SpeakingIntervalSeconds == seconds };
             item.Click += (_, _) => { _config.SpeakingIntervalSeconds = seconds; _speakingPlanner.IntervalMilliseconds = seconds * 1000; _speakingPlanner.Reset(Environment.TickCount64, initial: true); _config.Save(); };
@@ -1022,7 +1060,7 @@ internal sealed class CoachForm : Form
         }
         menu.Items.Add(speakingFrequency);
         menu.Items.Add("口說狀態／為何尚未邀請", null, (_, _) =>
-            MessageBox.Show(this, $"自動口說：{(_config.AutoSpeakingEnabled ? "已啟用" : "未啟用")}\n辨識模型：{(SpeakingRecognitionService.ModelAvailable ? "已安裝" : "缺少")}\n目前：{_speakingWaitReason}\n\n開啟後先等 30 秒；之後依設定間隔邀請。需遊戲在前景、8 秒未按操作鍵／空白鍵、沒有對話、CPU 低於 70%。", "口說狀態"));
+            MessageBox.Show(this, $"自動口說：{(_config.AutoSpeakingEnabled ? "已啟用" : "未啟用")}\n辨識模型：{(SpeakingRecognitionService.ModelAvailable ? "已安裝" : "缺少")}\n目前：{_speakingWaitReason}\n\n開啟後約 12 秒開始尋找空檔；之後依設定間隔邀請。需遊戲在前景、6 秒未按操作鍵／空白鍵、沒有對話、CPU 低於 70%。", "口說狀態"));
         menu.Items.Add($"翻譯方式（{(_config.TranslationProvider == TranslationProviders.Azure ? "Azure" : "本機")}）",
             null, (_, _) => OpenTranslationSettings());
         menu.Items.Add("本機流派資料／更新狀態", null, (_, _) => ShowBuildGuideDetails());
@@ -1136,7 +1174,7 @@ internal sealed class CoachForm : Form
                     return;
                 }
                 var consent = MessageBox.Show(this,
-                    "啟用後先等 30 秒，再依設定間隔邀請；會交替跟讀和看中文用英文回答，優先練剛才的教材。\n\n" +
+                    "啟用後約 12 秒開始尋找空檔，再依設定間隔邀請；會交替跟讀和看中文用英文回答，優先練剛才的教材。\n\n" +
                     "教練念完後會顯示「麥克風開啟」，使用 Windows 預設麥克風最多 10 秒；" +
                     "5 秒無聲會跳過，說完安靜約 1.2 秒即停止。\n\n" +
                     "收音時不播放教材。收音結束後，辨識若較慢會補一則短知識，再接文字核對回饋。\n\n" +
@@ -1151,7 +1189,7 @@ internal sealed class CoachForm : Form
             _config.Save();
             _speakingFaulted = false;
             _speakingPlanner.Reset(Environment.TickCount64, initial: true);
-            SetStatus(_config.AutoSpeakingEnabled ? $"自動口說已啟用 · 首次 30 秒後，之後約每 {_config.SpeakingIntervalSeconds} 秒尋找空檔" : "自動口說已關閉 · 麥克風關閉");
+            SetStatus(_config.AutoSpeakingEnabled ? $"自動口說已啟用 · 約 12 秒後優先尋找空檔，之後約每 {_config.SpeakingIntervalSeconds} 秒" : "自動口說已關閉 · 麥克風關閉");
         }
         finally { _settingsOpen = false; RestoreGameFocus(); }
     }
@@ -1164,7 +1202,7 @@ internal sealed class CoachForm : Form
             _gameWindow is null || NativeMethods.GetForegroundWindow() != _gameWindow.Handle ? "等待遊戲回到前景" :
             !NarrationEnvironmentClear() ? "等待遊戲對話／過場結束" :
             load.CpuPercent >= 70 ? $"CPU 忙碌（{load.CpuPercent:F0}%）" :
-            load.ActionKeyIdleMs < SpeakingPlanner.ActionQuietMs ? "等待 8 秒未按操作鍵" :
+            load.ActionKeyIdleMs < SpeakingPlanner.ActionQuietMs ? "等待 6 秒未按操作鍵" :
             _loadMonitor.DialogueKeyIdleMs < SpeakingPlanner.ActionQuietMs ? "剛按過空白鍵，等待對話結束" :
             _translating ? "等目前翻譯完成" : _speakingPlanner.RemainingMs(now) > 0 ? $"下一次邀請約 {_speakingPlanner.RemainingMs(now) / 1000 + 1} 秒後" :
             _speechService.IsBusy ? "等教練講完這段" : _captureBusy ? "等本次 OCR 完成" : "等待短暫穩定空檔";

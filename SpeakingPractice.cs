@@ -68,9 +68,11 @@ internal static class SpeakingSession
 // Pure clock-driven policy. No microphone, game input or model work here.
 internal sealed class SpeakingPlanner
 {
-    internal const long IntervalMs = 90_000;
+    internal const long IntervalMs = 60_000;
     internal const long QuietMs = 3_000;
-    internal const int ActionQuietMs = 8_000;
+    internal const int ActionQuietMs = 6_000;
+    internal const int InitialDelayMs = 12_000;
+    internal const int ReservationMs = 8_000;
     public int IntervalMilliseconds { get; set; } = (int)IntervalMs;
     public long RemainingMs(long now) => Math.Max(0, _nextDue - now);
     private long _nextDue;
@@ -90,9 +92,15 @@ internal sealed class SpeakingPlanner
 
     public void Reset(long now, bool initial = false)
     {
-        _nextDue = now + (initial ? 30_000 : IntervalMilliseconds);
+        _nextDue = now + (initial ? InitialDelayMs : IntervalMilliseconds);
         _quietSince = null;
     }
+
+    // Do not enqueue a fresh lecture just before speaking becomes due. The
+    // current paragraph may finish, then the microphone invitation gets the
+    // next audio boundary instead of being starved by continuous lessons.
+    public bool ReserveNextBoundary(long now, bool enabled) =>
+        enabled && RemainingMs(now) <= ReservationMs;
 
     public SpeakingPrompt? TryNext(long now, bool enabled, bool safe, bool readyToInvite = true,
         SpeakingPrompt? recentLesson = null)

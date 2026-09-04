@@ -1,5 +1,6 @@
 param(
-    [string]$Model = 'qwen3.5:2b-q4_K_M'
+    [string]$Model = 'qwen3.5:2b-q4_K_M',
+    [switch]$NonInteractive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,7 +14,7 @@ function Find-Ollama {
     return $null
 }
 
-Write-Host 'Diablo English Coach - local model setup' -ForegroundColor Yellow
+Write-Host 'Game English Coach - local model setup' -ForegroundColor Yellow
 $sizeText = if ($Model -eq 'qwen3.5:0.8b') { 'about 1 GB for the fast translation model' } else { 'about 2 GB for the coach model' }
 Write-Host "This installs Ollama and downloads $sizeText."
 Write-Host ''
@@ -61,4 +62,4 @@ if ($LASTEXITCODE -ne 0) { throw "Model download failed with exit code $LASTEXIT
 
 Write-Host ''
 Write-Host 'Setup complete. You can now open DiabloEnglishCoach.exe.' -ForegroundColor Green
-Read-Host 'Press Enter to close'
+if (-not $NonInteractive) { Read-Host 'Press Enter to close' }

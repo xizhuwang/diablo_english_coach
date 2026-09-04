@@ -82,7 +82,7 @@ internal static class Program
         }
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, eventArgs) =>
-            MessageBox.Show(eventArgs.Exception.Message, "Diablo English Coach", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(eventArgs.Exception.Message, "Game English Coach", MessageBoxButtons.OK, MessageBoxIcon.Error);
         Application.Run(new CoachForm());
     }
 }

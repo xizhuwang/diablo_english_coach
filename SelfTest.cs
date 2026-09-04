@@ -291,6 +291,12 @@ internal static class SelfTest
                 "Wait for the cooldown.", "等待充能完成才能行動。");
             checks["word_boundary_not_partial_match"] = !GameContextLessons.ContainsWord("The estate is empty.", "reset");
             checks["inflected_game_word_matches"] = GameContextLessons.Find("This effect increases damage.", "").Any(l => l.Word == "increase");
+            var confirmLink = GameContextLessons.Find("Confirm your choice.", "").Single(l => l.Word == "confirm");
+            var toeicExtension = GameContextLessons.Create(confirmLink, true);
+            checks["toeic_extension_is_complete_sentence"] = toeicExtension.English == "Please confirm the delivery schedule." &&
+                toeicExtension.SentenceMeaning == "請確認交貨時程。" && toeicExtension.Topic == "toeic";
+            checks["toeic_500_750_bank_expanded"] = GameContextLessons.Find(
+                "Complete, receive, select, provide, replace, reduce, collect, purchase, and improve.", "").Count >= 9;
             checks["unrelated_model_lesson_rejected"] = !generatedPlanner.AddPersonalizedLesson(parsedPersonalized! with { AnchorWord = "confirm" });
             foreach (var (word, topic) in new[] { ("increase", "toeic"), ("reset", "ic") })
             {

@@ -12,12 +12,12 @@ internal static class SpeakingSelfTest
         checks["speaking_opt_in_default"] = !new CoachConfig().AutoSpeakingEnabled;
         var planner = new SpeakingPlanner();
         planner.Reset(0);
-        checks["speaking_waits_ninety_seconds"] = planner.TryNext(70_000, true, true) is null;
-        checks["speaking_invites_when_quiet"] = planner.TryNext(90_000, true, true) is not null;
-        checks["speaking_no_burst"] = planner.TryNext(90_001, true, true) is null;
+        checks["speaking_waits_sixty_seconds"] = planner.TryNext(50_000, true, true) is null;
+        checks["speaking_invites_when_quiet"] = planner.TryNext(60_000, true, true) is not null;
+        checks["speaking_no_burst"] = planner.TryNext(60_001, true, true) is null;
         checks["speaking_busy_blocks"] = planner.TryNext(600_000, true, false) is null;
         checks["speaking_new_quiet_window"] = planner.TryNext(601_000, true, true) is null;
-        checks["speaking_resumes"] = planner.TryNext(616_000, true, true) is not null;
+        checks["speaking_resumes"] = planner.TryNext(604_000, true, true) is not null;
         checks["speaking_disabled_blocks"] = planner.TryNext(900_000, false, true) is null;
         checks["speaking_safe_gate"] = SpeakingPlanner.CanStart(true, true, false, 30, 20000, 20000, 20000);
         checks["speaking_blocks_dialogue"] = !SpeakingPlanner.CanStart(true, true, false, 30, 20000, 20000, 3000);
@@ -39,11 +39,11 @@ internal static class SpeakingSelfTest
         checks["speaking_empty_is_skip"] = SpeakingFeedback.Describe("Hello.", "").Contains("先繼續玩");
         var busyVoicePlanner = new SpeakingPlanner();
         busyVoicePlanner.Reset(0);
-        busyVoicePlanner.TryNext(70_000, true, true, readyToInvite: false);
-        checks["speaking_waits_for_paragraph_boundary"] = busyVoicePlanner.TryNext(90_000, true, true, false) is null;
+        busyVoicePlanner.TryNext(50_000, true, true, readyToInvite: false);
+        checks["speaking_waits_for_paragraph_boundary"] = busyVoicePlanner.TryNext(60_000, true, true, false) is null;
         var related = SpeakingPlanner.FromLesson(new IdleLesson("多益", "Please confirm the schedule.",
             "confirm＝確認。schedule＝時程。", "toeic", "請確認時程。"));
-        checks["speaking_not_starved_by_continuous_lessons"] = busyVoicePlanner.TryNext(90_001, true, true,
+        checks["speaking_not_starved_by_continuous_lessons"] = busyVoicePlanner.TryNext(60_001, true, true,
             readyToInvite: true, recentLesson: related)?.English == "Please confirm the schedule.";
         checks["speaking_bridge_is_related_and_short"] = related?.Knowledge == "confirm＝確認";
         checks["speaking_does_not_repeat_untranslated_lesson"] = SpeakingPlanner.FromLesson(new IdleLesson("x", "Some random sentence.", "單字提示")) is null;
