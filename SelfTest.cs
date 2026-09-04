@@ -83,9 +83,13 @@ internal static class SelfTest
             using var questPrepared = CaptureService.PrepareForOcr(questCrop);
             var ocr = new OcrService();
             var questText = await ocr.RecognizeAsync(questPrepared, CancellationToken.None);
-            var questFound = questText.Contains("Ashwold", StringComparison.OrdinalIgnoreCase) ||
-                             questText.Contains("Cemetery", StringComparison.OrdinalIgnoreCase) ||
-                             questText.Contains("Risen", StringComparison.OrdinalIgnoreCase);
+            var questFound = OcrService.LooksLikeEnglishSubtitle(questText) &&
+                             (questText.Contains("head", StringComparison.OrdinalIgnoreCase) ||
+                              questText.Contains("talk", StringComparison.OrdinalIgnoreCase) ||
+                              questText.Contains("defeat", StringComparison.OrdinalIgnoreCase) ||
+                              questText.Contains("find", StringComparison.OrdinalIgnoreCase) ||
+                              questText.Contains("watch", StringComparison.OrdinalIgnoreCase) ||
+                              questText.Contains("cemetery", StringComparison.OrdinalIgnoreCase));
             result["quest_text"] = questText;
             result["quest_objective_found"] = questFound;
             result["passed"] = questFound;
@@ -191,6 +195,11 @@ internal static class SelfTest
                                         KeyboardActivityMonitor.IsActionKey((int)Keys.A) &&
                                         KeyboardActivityMonitor.IsActionKey((int)Keys.S) &&
                                         KeyboardActivityMonitor.IsActionKey((int)Keys.D);
+            var screen = new Rectangle(0, 0, 1920, 1040);
+            checks["old_top_position_hits_enemy_hud"] = CoachForm.OverlapsEnemyHud(
+                new Rectangle(346, 10, 1229, 158), screen);
+            checks["new_bottom_position_avoids_enemy_hud"] = !CoachForm.OverlapsEnemyHud(
+                new Rectangle(346, 872, 1229, 158), screen);
 
             var passed = checks.Values.OfType<bool>().All(value => value);
             checks["passed"] = passed;

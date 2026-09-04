@@ -11,7 +11,7 @@ internal sealed class RegionPickerForm : Form
 
     public Rectangle SelectedImageRectangle { get; private set; }
 
-    public RegionPickerForm(Bitmap screenshot, CoachConfig config, CaptureRegionKind kind)
+    public RegionPickerForm(Bitmap screenshot, CoachConfig config, CaptureRegionKind kind, Rectangle gameClientBounds)
     {
         _screenshot = (Bitmap)screenshot.Clone();
         _instruction = kind == CaptureRegionKind.Dialogue
@@ -28,8 +28,10 @@ internal sealed class RegionPickerForm : Form
             (int)Math.Round(screenshot.Height * height));
 
         Text = kind == CaptureRegionKind.Dialogue ? "框選英文對話字幕區" : "框選英文任務目標區";
-        WindowState = FormWindowState.Maximized;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = gameClientBounds;
         FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
         BackColor = Color.Black;
         Cursor = Cursors.Cross;
         DoubleBuffered = true;

@@ -9,5 +9,5 @@ test_english.png
 self-test.json
 voice-samples/
 ui-preview.png
-screenshot-test.json
+screenshot-test*.json
 quest-coach-test.json

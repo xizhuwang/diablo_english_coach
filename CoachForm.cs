@@ -15,6 +15,7 @@ internal sealed class CoachForm : Form
     private WindowInfo? _gameWindow;
     private bool _captureBusy;
     private bool _running;
+    private bool _positionAtGameOnShown;
     private bool _interactionInProgress;
     private bool _coachBusy;
     private int _scanSequence;
@@ -74,8 +75,12 @@ internal sealed class CoachForm : Form
         Size = new Size(overlayWidth, _config.CompactMode ? CompactHeight : ExpandedHeight);
         MinimumSize = new Size(700, CompactHeight);
         MaximumSize = new Size(1600, ExpandedHeight);
-        var defaultLocation = new Point(area.Left + (area.Width - Width) / 2, area.Top + 10);
-        Location = SavedLocationIsVisible(area)
+        var defaultLocation = new Point(
+            area.Left + (area.Width - Width) / 2,
+            Math.Max(area.Top, area.Bottom - Height - 10));
+        var useSavedLocation = SavedLocationIsVisible(area) && !SavedLocationOverlapsEnemyHud(area);
+        _positionAtGameOnShown = !useSavedLocation;
+        Location = useSavedLocation
             ? new Point(_config.WindowLeft, _config.WindowTop)
             : defaultLocation;
         TopMost = true;
@@ -199,7 +204,7 @@ internal sealed class CoachForm : Form
     private async void OnShown(object? sender, EventArgs eventArgs)
     {
         _gameWindow = CaptureService.FindDiabloWindow();
-        if (_gameWindow is not null && _config.WindowLeft < 0)
+        if (_gameWindow is not null && _positionAtGameOnShown)
             PositionOverGameWindow(_gameWindow.ClientBounds);
         var model = await _coachService.CheckAsync(_config, _lifetimeCts.Token);
         var game = _gameWindow is null ? "尚未找到 Diablo Immortal 視窗" : "已找到遊戲視窗";
@@ -214,6 +219,7 @@ internal sealed class CoachForm : Form
         SetStatus(_running ? "自動負載模式已啟用；戰鬥按鍵時只記錄，空白鍵不會暫緩教學。" : "已暫停");
         if (_running)
             _ = ScanOnceAsync(force: false);
+        BeginInvoke(RestoreGameFocus);
     }
 
     private async void ScanTimerTick(object? sender, EventArgs eventArgs) => await ScanOnceAsync(force: false);
@@ -497,7 +503,6 @@ internal sealed class CoachForm : Form
         menu.Items.Add("設定任務目標區", null, (_, _) => PickRegion(CaptureRegionKind.Quest));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("測試兩個辨識區", null, async (_, _) => await TestCaptureAsync());
-        menu.Closed += (_, _) => menu.Dispose();
         menu.Show(_regionButton, new Point(0, _regionButton.Height));
     }
 
@@ -516,8 +521,11 @@ internal sealed class CoachForm : Form
         try
         {
             Thread.Sleep(180);
+            if (!CaptureService.TryRefresh(_gameWindow, out var refreshed))
+                throw new InvalidOperationException("遊戲視窗目前不可見，或已最小化。");
+            _gameWindow = refreshed;
             using var screenshot = CaptureService.CaptureClient(_gameWindow);
-            using var picker = new RegionPickerForm(screenshot, _config, kind);
+            using var picker = new RegionPickerForm(screenshot, _config, kind, _gameWindow.ClientBounds);
             if (picker.ShowDialog() == DialogResult.OK)
             {
                 var selection = picker.SelectedImageRectangle;
@@ -553,7 +561,7 @@ internal sealed class CoachForm : Form
         finally
         {
             Show();
-            Activate();
+            RestoreGameFocus();
             if (wasRunning)
                 _scanTimer.Start();
         }
@@ -583,11 +591,16 @@ internal sealed class CoachForm : Form
             ForeColor = Color.WhiteSmoke,
             Font = Font
         };
-        menu.Items.Add("告訴我下一步", null, (_, _) => AskNextStep());
-        menu.Items.Add("出一題英文挑戰", null, (_, _) => StartChallenge());
+        menu.Items.Add("告訴我下一步", null, (_, _) => RunInteraction(AskNextStep));
+        menu.Items.Add("出一題英文挑戰", null, (_, _) => RunInteraction(StartChallenge));
         menu.Items.Add("自由提問／回答", null, (_, _) => OpenAskCoach());
-        menu.Closed += (_, _) => menu.Dispose();
         menu.Show(_interactButton, new Point(0, _interactButton.Height));
+    }
+
+    private void RunInteraction(Action action)
+    {
+        action();
+        BeginInvoke(RestoreGameFocus);
     }
 
     private void AskNextStep()
@@ -624,6 +637,7 @@ internal sealed class CoachForm : Form
             !string.IsNullOrWhiteSpace(_currentDialogue));
         if (ask.ShowDialog(this) == DialogResult.OK)
             AskQuickQuestion(ask.Question);
+        RestoreGameFocus();
     }
 
     private void AskQuickQuestion(string question)
@@ -676,9 +690,14 @@ internal sealed class CoachForm : Form
 
     private void ToggleCompactMode()
     {
+        var workingArea = Screen.FromRectangle(Bounds).WorkingArea;
+        var wasDockedNearBottom = Bottom >= workingArea.Bottom - 45;
+        var previousBottom = Bottom;
         _config.CompactMode = !_config.CompactMode;
         _contentPanel.Visible = !_config.CompactMode;
         Height = _config.CompactMode ? CompactHeight : ExpandedHeight;
+        if (wasDockedNearBottom)
+            Top = previousBottom - Height;
         _collapseButton.Text = _config.CompactMode ? "▾" : "▴";
         _config.Save();
         ApplyRoundedCorners();
@@ -700,8 +719,32 @@ internal sealed class CoachForm : Form
     {
         Location = new Point(
             gameBounds.Left + Math.Max(0, (gameBounds.Width - Width) / 2),
-            gameBounds.Top + 10);
+            Math.Max(gameBounds.Top, gameBounds.Bottom - Height - 10));
         ClampToVisibleScreen();
+    }
+
+    private void RestoreGameFocus()
+    {
+        if (_gameWindow is not null && _gameWindow.Handle != nint.Zero)
+            NativeMethods.SetForegroundWindow(_gameWindow.Handle);
+    }
+
+    private bool SavedLocationOverlapsEnemyHud(Rectangle screenArea)
+    {
+        if (_config.WindowLeft < 0 || _config.WindowTop < 0)
+            return false;
+        var saved = new Rectangle(_config.WindowLeft, _config.WindowTop, Width, Height);
+        return OverlapsEnemyHud(saved, screenArea);
+    }
+
+    internal static bool OverlapsEnemyHud(Rectangle overlay, Rectangle screenArea)
+    {
+        var enemyHud = new Rectangle(
+            screenArea.Left + (int)Math.Round(screenArea.Width * 0.31),
+            screenArea.Top,
+            (int)Math.Round(screenArea.Width * 0.38),
+            Math.Min(150, screenArea.Height));
+        return overlay.IntersectsWith(enemyHud);
     }
 
     private bool SavedLocationIsVisible(Rectangle screenArea)
