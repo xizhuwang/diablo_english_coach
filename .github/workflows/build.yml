@@ -1,0 +1,33 @@
+name: Build Windows coach
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish self-contained app
+        shell: pwsh
+        run: dotnet publish -c Release -r win-x64 --self-contained true -o dist/app
+
+      - name: Assemble download folder
+        shell: pwsh
+        run: |
+          Copy-Item README.md dist/README.md
+          Copy-Item 安裝本機模型.cmd dist/安裝本機模型.cmd
+          New-Item -ItemType Directory -Force dist/scripts | Out-Null
+          Copy-Item scripts/setup-model.ps1 dist/scripts/setup-model.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Diablo-English-Coach-Windows-x64
+          path: dist
+          if-no-files-found: error

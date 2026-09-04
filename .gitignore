@@ -1,0 +1,9 @@
+.dotnet/
+.vs/
+bin/
+obj/
+publish/
+*.user
+*.log
+test_english.png
+self-test.json
