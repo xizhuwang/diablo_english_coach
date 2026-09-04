@@ -20,7 +20,7 @@ internal sealed class NarrationGuard
 
     public void ObserveSpaceKey(long now, long spaceKeyIdleMs)
     {
-        if (spaceKeyIdleMs < SpaceTailMs) Block(now, SpaceTailMs);
+        if (spaceKeyIdleMs < SpaceTailMs) Block(now, SpaceTailMs - Math.Max(0, spaceKeyIdleMs));
     }
 
     public void ObserveQuestPanel(long now, bool questVisible)

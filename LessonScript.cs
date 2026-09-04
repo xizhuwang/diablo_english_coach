@@ -60,15 +60,10 @@ internal static class LessonScript
     {
         var lesson = Complete(source);
         if (lesson.Topic == "review")
-            return $"複習剛才遇到的單字。{lesson.Chinese}";
+            return SpokenStyle.Clean($"複習剛才遇到的單字。{lesson.Chinese}");
         if (string.IsNullOrWhiteSpace(lesson.SentenceMeaning))
-            return $"接下來是{lesson.Title}，不是新的任務指示。這則資料提到：{lesson.English}。{lesson.Chinese}";
-        var context = lesson.Topic switch
-        {
-            "toeic" => "用一個職場例句練多益英文。",
-            "ic" => "練習數位 IC 面試的英文表達。",
-            _ => "練一個遊戲英文例句，不是要你現在照做。"
-        };
-        return $"{context}例句：{lesson.English}。整句意思是：{lesson.SentenceMeaning}用法重點：{lesson.Chinese}";
+            return SpokenStyle.Clean($"{lesson.English}。{lesson.Chinese}");
+        var context = GameContextLessons.Introduction(lesson);
+        return SpokenStyle.Clean($"{context}例句：{lesson.English}。整句意思是：{lesson.SentenceMeaning}用法重點：{lesson.Chinese}");
     }
 }

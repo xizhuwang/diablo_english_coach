@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace DiabloEnglishCoach;
 
-internal sealed record SpeakingPrompt(string English, string Chinese, string Knowledge = "把句子分成兩個短片語，通常比較容易說順。");
+internal sealed record SpeakingPrompt(string English, string Chinese, string Knowledge = "把句子分成兩個短片語，通常比較容易說順。", bool Recall = false);
 
 internal static class SpeakingSession
 {
@@ -69,7 +69,10 @@ internal static class SpeakingSession
 internal sealed class SpeakingPlanner
 {
     internal const long IntervalMs = 90_000;
-    internal const long QuietMs = 15_000;
+    internal const long QuietMs = 3_000;
+    internal const int ActionQuietMs = 8_000;
+    public int IntervalMilliseconds { get; set; } = (int)IntervalMs;
+    public long RemainingMs(long now) => Math.Max(0, _nextDue - now);
     private long _nextDue;
     private long? _quietSince;
     private int _index;
@@ -82,18 +85,12 @@ internal sealed class SpeakingPlanner
         new("I need more time.", "我需要更多時間。", "more time 是更多時間；time 在這裡不用加複數。"),
         new("This skill deals more damage.", "這個技能造成更多傷害。", "deal damage 是造成傷害；單數 skill 搭配 deals。"),
         new("Stay close to me.", "待在我附近。", "stay close to 是保持靠近，後面可接人或地點。"),
-        new("I am ready to help.", "我準備好幫忙了。", "ready to 後面接原形動詞，表示準備好做某件事。"),
-        new("Please confirm the schedule.", "請確認時程。", "confirm 後面接要確認的事情；schedule 是時程。"),
-        new("The meeting has been postponed.", "會議已經延期。", "has been postponed 表示已被延期。"),
-        new("Submit the form before the deadline.", "在截止期限前提交表單。", "before 表示在某個時間之前；deadline 是截止期限。"),
-        new("A flip-flop stores one bit.", "正反器儲存一個位元。", "stores 是儲存；one bit 是一個位元。"),
-        new("Reset places the design in a known state.", "重置會把設計帶到已知狀態。", "known state 是已知狀態；reset 是重置。"),
-        new("Combinational logic depends on current inputs.", "組合邏輯取決於目前輸入。", "depends on 表示取決於；inputs 是輸入。")
+        new("I am ready to help.", "我準備好幫忙了。", "ready to 後面接原形動詞，表示準備好做某件事。")
     ];
 
-    public void Reset(long now)
+    public void Reset(long now, bool initial = false)
     {
-        _nextDue = now + IntervalMs;
+        _nextDue = now + (initial ? 30_000 : IntervalMilliseconds);
         _quietSince = null;
     }
 
@@ -110,7 +107,7 @@ internal sealed class SpeakingPlanner
             return null;
         Reset(now); // Interrupted/skipped exercises never accumulate.
         var fallback = Prompts[_index++ % Prompts.Length];
-        return recentLesson ?? fallback;
+        return (recentLesson ?? fallback) with { Recall = _index % 2 == 0 };
     }
 
     internal static SpeakingPrompt? FromLesson(IdleLesson? lesson)
@@ -129,8 +126,8 @@ internal sealed class SpeakingPlanner
 
     internal static bool CanStart(bool enabled, bool foreground, bool pendingWork,
         double cpu, int actionIdleMs, int dialogueKeyIdleMs, long sinceDialogueMs) =>
-        enabled && foreground && !pendingWork && cpu < 55 && actionIdleMs >= QuietMs &&
-        dialogueKeyIdleMs >= QuietMs && sinceDialogueMs >= QuietMs;
+        enabled && foreground && !pendingWork && cpu < 70 && actionIdleMs >= ActionQuietMs &&
+        dialogueKeyIdleMs >= ActionQuietMs && sinceDialogueMs >= ActionQuietMs;
 
     internal static bool ShouldInterrupt(bool running, bool foreground, bool settingsOpen,
         double cpu, int actionIdleMs, int dialogueKeyIdleMs) =>
@@ -150,7 +147,7 @@ internal static class SpeakingFeedback
         if (heard.Length == 0)
             return "這次沒有辨識到清楚的英文，先繼續玩；下次再試。";
         if (expected.SequenceEqual(heard))
-            return "辨識文字與練習句一致！這是文字核對，不代表發音評分。";
+            return "聽到的字和練習句一致，這句說完整了！";
         // Ordered matching (LCS): repeated words and swapped word order matter.
         var table = new int[expected.Length + 1, heard.Length + 1];
         for (var i = expected.Length - 1; i >= 0; i--)
@@ -165,6 +162,6 @@ internal static class SpeakingFeedback
             else missing.Add(expected[i++]);
         }
         return missing.Count == 0 ? "有聽到目標句的用字，也辨識到其他字；可再跟讀一次短句。"
-            : $"可能沒聽清：{string.Join(" · ", missing.Take(5))}。下次留意這幾個字；也可能是辨識誤差。";
+            : $"這次沒聽清：{string.Join(" · ", missing.Take(5))}。下一次把這幾個字說清楚一點。";
     }
 }

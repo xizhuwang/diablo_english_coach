@@ -9,7 +9,7 @@ namespace DiabloEnglishCoach;
 // hash prevents stale prompt behavior from being reused after future changes.
 internal sealed class CoachKnowledgeCache
 {
-    private const string PromptVersion = "coach-v1";
+    private const string PromptVersion = "coach-v2-direct-speech";
     private const int Limit = 128;
     private readonly string _path;
     private readonly Dictionary<string, SavedReply> _items = new(StringComparer.Ordinal);

@@ -174,13 +174,13 @@ internal sealed class BuildGuideCache
     {
         if (!config.BuildTipsEnabled || config.PlayerClass != "Necromancer") return null;
         var guide = Current;
-        var heading = $"本機攻略 · 來源 {guide.SourceUpdatedAt:MM-dd} · 非最新保證";
+        var heading = "死靈 PvE 配裝";
         // Conditional references, not an assertion of owned/unlocked equipment.
         var cards = new[]
         {
-            new IdleLesson(heading, guide.Skills[0], "PvE 來源列出此技能；若已解鎖，可先讀技能效果。skill＝技能；effect＝效果。"),
-            new IdleLesson(heading, guide.SetName, "來源列出的套裝候選，非前期必需。set＝套裝；piece＝件數。實際效果以遊戲為準。"),
-            new IdleLesson(heading, guide.MainWeapon, "來源列出的武器候選，不代表你已持有或應立即更換。先比較目前技能與傳奇效果。"),
+            new IdleLesson(heading, guide.Skills[0], "這份 PvE 配置使用這個技能。解鎖後，先看它的 effect，也就是效果。skill 是技能。"),
+            new IdleLesson(heading, guide.SetName, "這份 PvE 配置的套裝候選。set 是套裝，piece 是件數。前期先把常用技能配好，再逐步收集套裝。"),
+            new IdleLesson(heading, guide.MainWeapon, "這份 PvE 配置的武器候選。拿到時，先比較它的傳奇效果是否強化你的常用技能。"),
             new IdleLesson(heading, "Compare skills before changing gear.", $"比較技能後再換裝；來源技能之一：{guide.Skills[2]}。未解鎖就先保留現有配置。")
         };
         return cards[(index & int.MaxValue) % cards.Length];

@@ -20,6 +20,8 @@ internal sealed class SpeechService : IDisposable
     public Func<bool>? MayStartPlayback { get; set; }
 
     public event Action<string>? StatusChanged;
+    public event Action<SpeechPlayback>? PlaybackChanged;
+    private long _playbackId;
 
     public SpeechService(CoachConfig config, bool initializeLocalVoice = true)
     {
@@ -104,18 +106,38 @@ internal sealed class SpeechService : IDisposable
         if (MayStartPlayback?.Invoke() == false)
             return false;
 
-        // Called only by the serial paragraph queue. A new request is not a stop command.
-        if (!_config.UseOnlineNeuralVoice)
+        var id = Interlocked.Increment(ref _playbackId);
+        var started = false;
+        var completed = false;
+        void Started()
         {
-            var localGeneration = Volatile.Read(ref _generation);
-            return SpeakLocal(text, chinese) && await WaitForLocalAsync(localGeneration);
+            if (started) return;
+            started = true;
+            PublishPlayback(new(id, text, true));
         }
-
-        var generation = Volatile.Read(ref _generation);
-        return await SpeakNeuralAsync(text, chinese, generation);
+        try
+        {
+            // Transcript starts after the player accepts audio, not while TTS downloads.
+            var generation = Volatile.Read(ref _generation);
+            if (!_config.UseOnlineNeuralVoice)
+            {
+                if (!SpeakLocal(text, chinese)) return false;
+                Started();
+                completed = await WaitForLocalAsync(generation);
+            }
+            else completed = await SpeakNeuralAsync(text, chinese, generation, Started);
+            return completed;
+        }
+        finally { if (started) PublishPlayback(new(id, text, false, completed)); }
     }
 
-    private async Task<bool> SpeakNeuralAsync(string text, bool chinese, int generation)
+    private void PublishPlayback(SpeechPlayback playback)
+    {
+        try { PlaybackChanged?.Invoke(playback); }
+        catch { /* Transcript UI must never fail or restart audio playback. */ }
+    }
+
+    private async Task<bool> SpeakNeuralAsync(string text, bool chinese, int generation, Action started)
     {
         var path = Path.Combine(Path.GetTempPath(), $"diablo-coach-{Guid.NewGuid():N}.mp3");
         Task? download = null;
@@ -164,6 +186,7 @@ internal sealed class SpeechService : IDisposable
                 if (error != 0)
                     throw new InvalidOperationException(GetMciError(error));
             }
+            started();
             Notify($"自然語音：{voice} · 語速 {rate}");
             while (!_disposed && generation == Volatile.Read(ref _generation))
             {
@@ -195,7 +218,9 @@ internal sealed class SpeechService : IDisposable
             // Invoked from the UI, so captured await context keeps SAPI on its owner thread.
             if (!_disposed && generation == Volatile.Read(ref _generation) && MayStartPlayback?.Invoke() != false)
             {
-                return SpeakLocal(text, chinese) && await WaitForLocalAsync(generation);
+                if (!SpeakLocal(text, chinese)) return false;
+                started();
+                return await WaitForLocalAsync(generation);
             }
             return false;
         }

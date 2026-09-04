@@ -12,12 +12,13 @@ internal static class SelfTest
         var passed = true;
         foreach (var topic in new[] { "toeic", "ic", "game" })
         {
+            var anchor = topic == "ic" ? "reset" : topic == "toeic" ? "increase" : "cooldown";
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var lesson = await new CoachService().CreatePersonalizedLessonAsync(
                 new LessonPersonalizationContext(topic,
                     "多益核心字: Please confirm the delivery schedule.",
-                    "follow=跟隨, damage=傷害"),
-                "Head to Ashwold Cemetery.", "Stay close.",
+                    "follow=跟隨, damage=傷害", anchor),
+                "Increase skill damage. Reset your skills. Wait for the cooldown.", "Stay close.",
                 new CoachConfig { InferenceThreads = 4 }, CancellationToken.None);
             results.Add(new
             {
@@ -251,16 +252,17 @@ internal static class SelfTest
             }
             checks["idle_repeats_seen_words"] = lessons.Any(lesson => lesson.English == "head to");
             checks["idle_includes_build_preparation"] = lessons.Any(lesson => lesson.Title.Contains("配裝"));
-            checks["idle_includes_toeic"] = lessons.Any(lesson => lesson.Topic == "toeic");
-            checks["idle_includes_digital_ic"] = lessons.Any(lesson => lesson.Topic == "ic");
+            checks["idle_no_unconnected_toeic"] = lessons.All(lesson => lesson.Topic != "toeic");
+            checks["idle_no_unconnected_digital_ic"] = lessons.All(lesson => lesson.Topic != "ic");
             checks["idle_includes_game_english"] = lessons.Any(lesson => lesson.Topic == "game");
             checks["idle_varied_lessons"] = lessons.Select(lesson => lesson.English).Distinct().Count() >= 7;
             checks["idle_avoids_short_term_repetition"] = !lessons.Zip(lessons.Skip(1))
                 .Any(pair => pair.First.English == pair.Second.English);
             var generatedPlanner = new IdleLessonPlanner(persistGenerated: false);
-            var generated = new IdleLesson("AI 個人化 · 數位 IC",
-                "Describe the timing constraint before synthesis.",
-                "constraint＝限制條件。面試回答時先說明限制的目的。", "ic", "合成前先說明時序限制。");
+            generatedPlanner.ObserveGameContext("Wait for the cooldown.", "");
+            var generated = new IdleLesson("AI 個人化 · 遊戲",
+                "The cooldown ends after a few seconds.",
+                "cooldown 是冷卻時間。after 後面接經過的時間。", "game", "冷卻時間會在幾秒後結束。", "cooldown");
             checks["personalized_lesson_is_queued"] = generatedPlanner.AddPersonalizedLesson(generated);
             checks["personalized_exact_duplicate_rejected"] = !generatedPlanner.AddPersonalizedLesson(generated);
             generatedPlanner.Reset(0);
@@ -272,8 +274,8 @@ internal static class SelfTest
                 """{"english":"Please confirm the revised schedule.","sentence_meaning":"請確認修訂後的時程。","usage":"confirm 後面接要確認的事情。","keyword":"confirm"}""");
             checks["personalized_model_json_parses"] = parsedPersonalized is
                 { Topic: "toeic", English: "Please confirm the revised schedule." };
-            var script = LessonScript.Narrate(parsedPersonalized!);
-            checks["lesson_has_context_example_translation_usage"] = script.Contains("職場") &&
+            var script = LessonScript.Narrate(parsedPersonalized! with { AnchorWord = "confirm" });
+            checks["lesson_has_context_example_translation_usage"] = script.Contains("遊戲裡的 confirm") &&
                 script.IndexOf("例句：") < script.IndexOf("整句意思是：") &&
                 script.Contains("請確認修訂後的時程") && script.Contains("confirm 後面接");
             checks["curriculum_all_examples_have_meanings"] = lessons.Where(l => l.Title is "多益核心字" or "數位 IC 面試字" or "遊戲英文")
@@ -284,6 +286,41 @@ internal static class SelfTest
                 "AI 個人化 · 多益", "toeic", "confirm, schedule",
                 """{"english":"Please purchase the item.","traditional_chinese":"這是購買的意思。","keyword":"purchase","meaning":"購買"}""") is null;
 
+            checks["cooldown_is_not_circuit_timing"] = !GameContextLessons.Allows("cooldown", "ic");
+            checks["cooldown_charging_error_rejected"] = !GameContextLessons.SafeExample("cooldown",
+                "Wait for the cooldown.", "等待充能完成才能行動。");
+            checks["word_boundary_not_partial_match"] = !GameContextLessons.ContainsWord("The estate is empty.", "reset");
+            checks["inflected_game_word_matches"] = GameContextLessons.Find("This effect increases damage.", "").Any(l => l.Word == "increase");
+            checks["unrelated_model_lesson_rejected"] = !generatedPlanner.AddPersonalizedLesson(parsedPersonalized! with { AnchorWord = "confirm" });
+            foreach (var (word, topic) in new[] { ("increase", "toeic"), ("reset", "ic") })
+            {
+                var contextual = new IdleLessonPlanner(persistGenerated: false);
+                contextual.ObserveGameContext(word == "reset" ? "Reset your skills." : "Increase skill damage.", "");
+                var sequence = Enumerable.Range(1, 24).Select(i => contextual.TryNext(i * 1000, true,
+                    new CoachConfig { BuildTipsEnabled = false }, false)!).ToArray();
+                checks[$"{topic}_starts_with_game_meaning"] = sequence[0].Topic == "game" && sequence[0].AnchorWord == word;
+                var extensionTurns = sequence.Select((l, i) => (l, i)).Where(x => x.l.Topic == topic).Select(x => x.i).ToArray();
+                checks[$"{topic}_natural_extension_exists"] = extensionTurns.Length > 0;
+                checks[$"{topic}_extensions_spaced"] = !extensionTurns.Zip(extensionTurns.Skip(1)).Any(x => x.Second - x.First < 4);
+            }
+            var stale = new IdleLessonPlanner(persistGenerated: false);
+            stale.ObserveGameContext("Wait for the cooldown.", "");
+            stale.AddPersonalizedLesson(generated);
+            stale.ObserveGameContext("Follow the guide.", "");
+            checks["context_change_discards_queued_lesson"] = stale.TryNext(1000, true, lessonConfig, false)?.English != generated.English;
+            checks["speaking_skips_unrelated_previous_lesson"] = !stale.CanPractice(generated);
+            checks["no_context_skips_model_work"] = !new IdleLessonPlanner(persistGenerated: false).NeedsPersonalizedLesson;
+            checks["old_cached_lesson_boilerplate_removed"] = LessonScript.Narrate(new IdleLesson("遊戲英文", "Return to the gate.",
+                "return to 表示回到某處。這是例句，不是新的任務。實際效果以遊戲為準。", "game", "回到大門。", "return"))
+                is var direct && direct.Contains("例句：Return to the gate.") && direct.Contains("回到大門") &&
+                !direct.Contains("不是新的任務") && !direct.Contains("為準");
+            const string concreteLimit = "還沒看到你的裝備屬性。未解鎖就先保留現有配置。equip 是裝備，不是只放進背包。";
+            checks["direct_speech_keeps_real_conditions"] = SpokenStyle.Clean(concreteLimit) == concreteLimit;
+            checks["game_lessons_no_boilerplate"] = GameContextLessons.Find(
+                "Return to the gate. Reset your skills. Head to the gate. Follow the guide. Head forward. Defeat the enemy. Equip the item. Upgrade the item. Leave the dungeon.", "")
+                .Select(l => LessonScript.Narrate(GameContextLessons.Create(l, false)))
+                .All(s => !s.Contains("不是新") && !s.Contains("不是要") && !s.Contains("只是示範"));
+
             var englishOnly = new IdleLessonPlanner(persistGenerated: false);
             var noBuild = new CoachConfig { BuildTipsEnabled = false };
             englishOnly.Reset(0);
@@ -293,6 +330,8 @@ internal static class SelfTest
                 .All(lesson => lesson is not null && !lesson.Title.StartsWith("一般配裝"));
 
             foreach (var pair in await SpeakingSelfTest.PolicyAsync()) checks[pair.Key] = pair.Value;
+            foreach (var pair in await SpeechTranscriptSelfTest.RunAsync()) checks[pair.Key] = pair.Value;
+            foreach (var pair in ExperienceSelfTest.Run()) checks[pair.Key] = pair.Value;
             foreach (var pair in await ParagraphSpeechSelfTest.RunAsync()) checks[pair.Key] = pair.Value;
             foreach (var pair in await BuildGuideSelfTest.RunAsync()) checks[pair.Key] = pair.Value;
             await FastTranslationSelfTest.AddChecksAsync(checks);

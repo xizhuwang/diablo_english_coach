@@ -16,6 +16,10 @@ internal sealed class CoachForm : Form
     private readonly System.Windows.Forms.Timer _speakingGuard = new() { Interval = 250 };
     private CancellationTokenSource? _speakingCts;
     private long _lastTeachingAt;
+    private long _nextNarrationAt;
+    private bool _speakingCheckBusy;
+    private Task<bool>? _speakingDialogueCheck;
+    private string _speakingWaitReason = "教練尚未開啟";
     private long _lastSpeakingScreenCheck;
     private byte[]? _speakingScreen;
     private bool _speakingFaulted;
@@ -56,6 +60,12 @@ internal sealed class CoachForm : Form
     private readonly Label _simpleLabel = new();
     private readonly Label _chineseLabel = new();
     private readonly Panel _translationViewport = new() { AutoScroll = true };
+    private readonly Panel _transcriptViewport = new() { AutoScroll = true, Visible = false };
+    private readonly Label _transcriptLabel = new();
+    private readonly RowStyle _transcriptRow = new(SizeType.Absolute, 0);
+    private readonly SpeechTranscript _transcript = new();
+    private readonly System.Windows.Forms.Timer _transcriptTimer = new() { Interval = 1000 };
+    private bool _transcriptShown;
     private bool _translationLayoutReady;
     private bool _layingOutTranslation;
     private readonly Label _keywordsLabel = new();
@@ -82,6 +92,13 @@ internal sealed class CoachForm : Form
     public CoachForm(bool previewMode = false)
     {
         _previewMode = previewMode;
+        if (_config.ExperienceVersion < 1)
+        {
+            _config.SpeechRatePercent = Math.Min(0, _config.SpeechRatePercent);
+            _config.TranslationWidth = Math.Max(1200, _config.TranslationWidth);
+            _config.WindowLeft = _config.WindowTop = _config.WindowBottom = -1;
+            _config.ExperienceVersion = 1;
+        }
         // Migrate only the old broad lower-screen ROI, which included public chat.
         if (_config.OverlayLayoutVersion < 2)
         {
@@ -100,6 +117,9 @@ internal sealed class CoachForm : Form
         _speechService.MayStartPlayback = NarrationEnvironmentClear;
         _speechService.StatusChanged += message => SetStatus(message);
         InitializeUi();
+        _speechService.PlaybackChanged += OnPlaybackChanged;
+        _transcriptTimer.Tick += (_, _) => RefreshTranscript();
+        if (!previewMode) _transcriptTimer.Start();
         _scanTimer.Interval = Math.Clamp(_config.ScanIntervalMs, 700, 5000);
         _scanTimer.Tick += ScanTimerTick;
         _teachingTimer.Tick += (_, _) => TeachingTick();
@@ -122,13 +142,13 @@ internal sealed class CoachForm : Form
         StartPosition = FormStartPosition.Manual;
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
         var overlayWidth = Math.Min(area.Width - 20, _config.TranslationWidth > 0
-            ? _config.TranslationWidth : Math.Clamp((int)Math.Round(area.Width * 0.50), 640, 1100));
+            ? _config.TranslationWidth : Math.Clamp((int)Math.Round(area.Width * 0.65), 740, 1400));
         Size = new Size(overlayWidth, ExpandedHeight);
         MinimumSize = new Size(480, CompactHeight);
         MaximumSize = new Size(1600, 300);
         var defaultLocation = new Point(
             area.Left + (area.Width - Width) / 2,
-            Math.Max(area.Top, area.Bottom - Height - 10));
+            Math.Max(area.Top, area.Bottom - Height - 2));
         var useSavedLocation = SavedLocationIsVisible(area) && !SavedLocationOverlapsEnemyHud(area);
         _positionAtGameOnShown = !useSavedLocation;
         Location = useSavedLocation
@@ -149,10 +169,11 @@ internal sealed class CoachForm : Form
             Dock = DockStyle.Fill,
             Padding = new Padding(7, 4, 7, 5),
             ColumnCount = 1,
-            RowCount = 1,
+            RowCount = 2,
             BackColor = BackColor
         };
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(_transcriptRow);
         Controls.Add(root);
 
         var topBar = new TableLayoutPanel
@@ -182,6 +203,20 @@ internal sealed class CoachForm : Form
         _chineseLabel.TextChanged += (_, _) => ReflowTranslation(resetScroll: true);
         _translationViewport.SizeChanged += (_, _) => ReflowTranslation();
 
+        _transcriptViewport.Dock = DockStyle.Fill;
+        _transcriptViewport.Margin = Padding.Empty;
+        _transcriptViewport.BackColor = Color.FromArgb(30, 37, 48);
+        ConfigureContentLabel(_transcriptLabel, "", Color.FromArgb(191, 219, 254), 10, FontStyle.Regular);
+        _transcriptLabel.Dock = DockStyle.None;
+        _transcriptLabel.AutoEllipsis = false;
+        _transcriptLabel.UseMnemonic = false;
+        _transcriptLabel.TextAlign = ContentAlignment.TopLeft;
+        _transcriptLabel.Cursor = Cursors.Hand;
+        _transcriptLabel.Click += (_, _) => ShowTranscriptHistory();
+        _transcriptViewport.Controls.Add(_transcriptLabel);
+        root.Controls.Add(_transcriptViewport, 0, 1);
+        _transcriptViewport.SizeChanged += (_, _) => ReflowTranslation();
+
         var toolbar = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -199,6 +234,7 @@ internal sealed class CoachForm : Form
         });
         topBar.Controls.Add(toolbar, 1, 0);
         tips.SetToolTip(_chineseLabel, "拖曳移動；長文自動換行，超過四行可用右側捲軸閱讀。設定可調整寬度。");
+        tips.SetToolTip(_transcriptLabel, "教練正在朗讀的整段文字；長文可捲動，點擊可回看最近逐字稿。");
 
         _translationLayoutReady = true;
         PerformLayout();
@@ -226,7 +262,21 @@ internal sealed class CoachForm : Form
             // current Height is not a reliable way to infer the parent's padding.
             var chrome = Padding.Vertical + (_translationViewport.Parent?.Parent?.Padding.Vertical ?? 9);
             var visibleHeight = Math.Min(textHeight, lineHeight * 4 + _chineseLabel.Padding.Vertical + 4);
-            var targetHeight = Math.Max(CompactHeight, visibleHeight + chrome);
+            var transcriptHeight = 0;
+            if (_transcriptShown)
+            {
+                var width = Math.Max(80, _transcriptViewport.Width - SystemInformation.VerticalScrollBarWidth - 2);
+                var size = TextRenderer.MeasureText(_transcriptLabel.Text, _transcriptLabel.Font,
+                    new Size(Math.Max(40, width - _transcriptLabel.Padding.Horizontal), int.MaxValue),
+                    TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
+                var fullHeight = size.Height + _transcriptLabel.Padding.Vertical + 4;
+                var line = TextRenderer.MeasureText("國Ag", _transcriptLabel.Font).Height;
+                transcriptHeight = Math.Min(fullHeight, line * 3 + _transcriptLabel.Padding.Vertical + 4);
+                _transcriptLabel.Size = new Size(width, fullHeight);
+                _transcriptViewport.AutoScrollMinSize = new Size(0, fullHeight);
+            }
+            _transcriptRow.Height = transcriptHeight;
+            var targetHeight = Math.Max(CompactHeight, visibleHeight + chrome) + transcriptHeight;
             if (Height != targetHeight)
             {
                 Height = targetHeight;
@@ -238,6 +288,64 @@ internal sealed class CoachForm : Form
             if (resetScroll) _translationViewport.AutoScrollPosition = Point.Empty;
         }
         finally { _layingOutTranslation = false; }
+    }
+
+    private void OnPlaybackChanged(SpeechPlayback playback)
+    {
+        if (IsDisposed || Disposing) return;
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(() => OnPlaybackChanged(playback)); }
+            catch (InvalidOperationException) { }
+            return;
+        }
+        _transcript.Observe(playback, Environment.TickCount64);
+        if (!playback.Playing && _transcript.Current?.Id == playback.Id)
+            _nextNarrationAt = Environment.TickCount64 + Math.Clamp(_config.TeachingPauseSeconds, 5, 40) * 1000;
+        RefreshTranscript();
+    }
+
+    private void RefreshTranscript()
+    {
+        var show = _config.ShowCoachTranscript && _transcript.Visible(Environment.TickCount64);
+        var text = _transcript.Current is { } current ? $"教練｜{current.Text}" : "";
+        var changed = _transcriptLabel.Text != text;
+        if (_transcriptShown == show && !changed) return;
+        _transcriptShown = show;
+        _transcriptViewport.Visible = show;
+        _transcriptLabel.Text = text;
+        ReflowTranslation();
+        if (changed) _transcriptViewport.AutoScrollPosition = Point.Empty;
+    }
+
+    private void ShowTranscriptHistory()
+    {
+        _settingsOpen = true;
+        CancelPersonalization();
+        try
+        {
+            using var history = new Form
+            {
+                Text = "教練逐字稿 · 最近 30 段", Size = new Size(760, 460), MinimumSize = new Size(400, 240),
+                StartPosition = FormStartPosition.CenterParent, TopMost = true,
+                BackColor = BackColor, ForeColor = ForeColor
+            };
+            var text = new TextBox
+            {
+                Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill,
+                WordWrap = true, Font = Font, BackColor = BackColor, ForeColor = ForeColor,
+                Text = _transcript.FullText(), BorderStyle = BorderStyle.None
+            };
+            history.Controls.Add(text);
+            history.Shown += (_, _) =>
+            {
+                NativeMethods.SetWindowDisplayAffinity(history.Handle, NativeMethods.WdaExcludeFromCapture);
+                text.SelectionStart = text.TextLength;
+                text.ScrollToCaret();
+            };
+            history.ShowDialog(this);
+        }
+        finally { _settingsOpen = false; RestoreGameFocus(); }
     }
 
     private void SetTranslationWidth(int width)
@@ -293,7 +401,9 @@ internal sealed class CoachForm : Form
         _nextPersonalizationAt = Environment.TickCount64 + 8_000;
         _loadMonitor.SetEnabled(_running);
         _idleLessons.Reset(Environment.TickCount64);
-        _speakingPlanner.Reset(Environment.TickCount64);
+        _speakingPlanner.IntervalMilliseconds = Math.Clamp(_config.SpeakingIntervalSeconds, 45, 180) * 1000;
+        _speakingPlanner.Reset(Environment.TickCount64, initial: true);
+        _nextNarrationAt = Environment.TickCount64 + 5_000;
         _speakingFaulted = false;
         CancelSpeaking();
         if (!_running)
@@ -310,7 +420,7 @@ internal sealed class CoachForm : Form
         _startButton.Text = _running ? "關閉" : "開啟";
         _startButton.ForeColor = _running ? Color.FromArgb(248, 113, 113) : Color.FromArgb(167, 243, 208);
         _scanTimer.Enabled = _running && !_previewMode;
-        SetStatus(_running ? "已啟用：多益／數位 IC／遊戲英文輪替；空閒時由模型準備個人化教材。" : "已暫停");
+        SetStatus(_running ? "已啟用：先學遊戲英文，有自然連結才延伸多益／數位 IC。" : "已暫停");
         if (_running && !_previewMode)
             _ = ScanOnceAsync(force: false);
         BeginInvoke(RestoreGameFocus);
@@ -365,7 +475,7 @@ internal sealed class CoachForm : Form
             if (IsDisposed || runVersion != _runVersion || (!force && (!_running || _settingsOpen))) return;
             if (!force && NativeMethods.GetForegroundWindow() == _gameWindow.Handle)
             {
-                var visible = OcrService.LooksLikeEnglishSubtitle(dialogueText);
+                var visible = OcrService.LooksLikeCharacterDialogue(dialogueText);
                 if (visible) _lastDialogueAt = Environment.TickCount64;
                 _narrationGuard.ObserveDialogue(Environment.TickCount64, visible);
                 _narrationGuard.ObserveSpaceKey(Environment.TickCount64, _loadMonitor.DialogueKeyIdleMs);
@@ -406,7 +516,7 @@ internal sealed class CoachForm : Form
             if (NativeMethods.GetForegroundWindow() != _gameWindow.Handle)
                 return;
 
-            var dialogueVisible = OcrService.LooksLikeEnglishSubtitle(dialogueText);
+            var dialogueVisible = OcrService.LooksLikeCharacterDialogue(dialogueText);
             if (dialogueVisible)
             {
                 _lastDialogueAt = Environment.TickCount64;
@@ -429,6 +539,10 @@ internal sealed class CoachForm : Form
         finally
         {
             _captureBusy = false;
+            // Reserve the OCR completion boundary for a due invitation; frequent
+            // capture ticks must not starve the microphone scheduler forever.
+            if (!force && !_previewMode && _running && !_settingsOpen && _speakingCts is null && !IsDisposed)
+                TrySpeaking(_loadMonitor.Sample(false));
         }
     }
 
@@ -438,7 +552,7 @@ internal sealed class CoachForm : Form
             return string.Empty;
         using var capture = CaptureService.CaptureRegion(_gameWindow, _config, kind);
         using var prepared = CaptureService.PrepareForOcr(capture);
-        return await _ocrService.RecognizeAsync(prepared, _lifetimeCts.Token);
+        return await _ocrService.RecognizeAsync(prepared, _lifetimeCts.Token, dialogue: kind == CaptureRegionKind.Dialogue);
     }
 
     private bool HandleRecognizedText(
@@ -621,6 +735,7 @@ internal sealed class CoachForm : Form
 
     private void TeachingTick()
     {
+        _idleLessons.ObserveGameContext(Environment.TickCount64 - _lastDialogueAt <= 90_000 ? _currentDialogue : "", _currentQuest);
         if (!_running || _settingsOpen || _speakingCts is not null || _gameWindow is null ||
             NativeMethods.GetForegroundWindow() != _gameWindow.Handle)
         {
@@ -642,7 +757,7 @@ internal sealed class CoachForm : Form
         // Observe quiet time even while a lesson is playing; reserve the next
         // paragraph boundary for due speaking instead of starving it with lessons.
         if (TrySpeaking(load)) return;
-        var canSpeak = !load.ShouldDefer && NarrationMayStart() && now - _lastTeachingAt >= 1_000;
+        var canSpeak = !load.ShouldDefer && NarrationMayStart() && now >= _nextNarrationAt;
         if (canSpeak)
         {
             if (_readyReply is { } ready)
@@ -735,9 +850,9 @@ internal sealed class CoachForm : Form
     internal static string Narration(CoachReply reply)
     {
         var word = reply.Keywords.FirstOrDefault();
-        return reply.TraditionalChinese +
+        return SpokenStyle.Clean(reply.TraditionalChinese +
             (word is null ? "" : $" 英文重點：{word.Word}，{word.Meaning}。") +
-            (string.IsNullOrWhiteSpace(reply.Advice) ? "" : $" 配裝參考，不是背包判讀：{reply.Advice}");
+            (string.IsNullOrWhiteSpace(reply.Advice) ? "" : $" 配裝重點：{reply.Advice}"));
     }
 
     private void TryIdleLesson(LoadSnapshot load)
@@ -752,12 +867,13 @@ internal sealed class CoachForm : Form
         _keywordsLabel.Text = $"{lesson.Title}\n{lesson.English}\n{lesson.Chinese}";
         SetStatus(lesson.Title.StartsWith("AI 個人化", StringComparison.Ordinal)
             ? "空閒補充 · 個人化教材 · 已存本機避免重複"
-            : "空閒補充 · 多益／數位 IC／遊戲英文備用教材");
+            : "空閒補充 · 遊戲英文與同字延伸");
         SpeakLesson(lesson.English, LessonScript.Narrate(lesson));
     }
 
     private void SpeakLesson(string english, string chinese)
     {
+        chinese = SpokenStyle.Clean(chinese);
         _lastTeachingAt = Environment.TickCount64;
         if (_config.SpeakChinese)
             _speechService.SpeakTraditionalChinese(english.Length <= 120 && !chinese.Contains(english, StringComparison.OrdinalIgnoreCase)
@@ -768,7 +884,7 @@ internal sealed class CoachForm : Form
 
     private void DisplayReply(CoachReply reply)
     {
-        if (_speechService.IsBusy)
+        if (_speechService.IsBusy || Environment.TickCount64 < _nextNarrationAt)
         {
             _readyReply = reply;
             return;
@@ -871,7 +987,7 @@ internal sealed class CoachForm : Form
         {
             _settingsOpen = false;
             _idleLessons.Reset(Environment.TickCount64);
-            _speakingPlanner.Reset(Environment.TickCount64);
+            // Opening settings must not restart the entire invitation countdown.
         };
         var recognition = new ToolStripMenuItem("辨識範圍");
         recognition.DropDownItems.Add("設定對話字幕區", null, (_, _) => PickRegion(CaptureRegionKind.Dialogue));
@@ -880,6 +996,33 @@ internal sealed class CoachForm : Form
         menu.Items.Add(recognition);
 
         menu.Items.Add("聲音與語速", null, (_, _) => OpenVoiceSettings());
+        var transcript = new ToolStripMenuItem("顯示教練字幕") { Checked = _config.ShowCoachTranscript, CheckOnClick = true };
+        transcript.CheckedChanged += (_, _) =>
+        {
+            _config.ShowCoachTranscript = transcript.Checked;
+            _config.Save();
+            RefreshTranscript();
+        };
+        menu.Items.Add(transcript);
+        menu.Items.Add("教練逐字稿／最近 30 段", null, (_, _) => ShowTranscriptHistory());
+        var cadence = new ToolStripMenuItem("教練節奏（講完後的停頓）");
+        foreach (var seconds in new[] { 8, 12, 25 })
+        {
+            var item = new ToolStripMenuItem($"{seconds} 秒") { Checked = _config.TeachingPauseSeconds == seconds };
+            item.Click += (_, _) => { _config.TeachingPauseSeconds = seconds; _config.Save(); _nextNarrationAt = Environment.TickCount64 + seconds * 1000; };
+            cadence.DropDownItems.Add(item);
+        }
+        menu.Items.Add(cadence);
+        var speakingFrequency = new ToolStripMenuItem("口說邀請間隔");
+        foreach (var seconds in new[] { 45, 90, 150 })
+        {
+            var item = new ToolStripMenuItem($"{seconds} 秒") { Checked = _config.SpeakingIntervalSeconds == seconds };
+            item.Click += (_, _) => { _config.SpeakingIntervalSeconds = seconds; _speakingPlanner.IntervalMilliseconds = seconds * 1000; _speakingPlanner.Reset(Environment.TickCount64, initial: true); _config.Save(); };
+            speakingFrequency.DropDownItems.Add(item);
+        }
+        menu.Items.Add(speakingFrequency);
+        menu.Items.Add("口說狀態／為何尚未邀請", null, (_, _) =>
+            MessageBox.Show(this, $"自動口說：{(_config.AutoSpeakingEnabled ? "已啟用" : "未啟用")}\n辨識模型：{(SpeakingRecognitionService.ModelAvailable ? "已安裝" : "缺少")}\n目前：{_speakingWaitReason}\n\n開啟後先等 30 秒；之後依設定間隔邀請。需遊戲在前景、8 秒未按操作鍵／空白鍵、沒有對話、CPU 低於 70%。", "口說狀態"));
         menu.Items.Add($"翻譯方式（{(_config.TranslationProvider == TranslationProviders.Azure ? "Azure" : "本機")}）",
             null, (_, _) => OpenTranslationSettings());
         menu.Items.Add("本機流派資料／更新狀態", null, (_, _) => ShowBuildGuideDetails());
@@ -892,9 +1035,9 @@ internal sealed class CoachForm : Form
         var learning = new ToolStripMenuItem($"教學重點：{LearningFocusLabel(_config.LearningFocus)}");
         AddChoiceItems(learning, new (string Label, string Value)[]
         {
-            ("綜合（多益＋數位 IC＋遊戲）", LearningFocusOptions.Balanced),
-            ("多益優先", LearningFocusOptions.ToeicFirst),
-            ("數位 IC 面試優先", LearningFocusOptions.DigitalIcFirst)
+            ("遊戲為主，自然延伸", LearningFocusOptions.Balanced),
+            ("有連結時偏好多益", LearningFocusOptions.ToeicFirst),
+            ("有連結時偏好數位 IC", LearningFocusOptions.DigitalIcFirst)
         }, _config.LearningFocus, value => _config.LearningFocus = value);
         menu.Items.Add(learning);
 
@@ -907,7 +1050,7 @@ internal sealed class CoachForm : Form
         }
         menu.Items.Add(opacity);
         var translationWidth = new ToolStripMenuItem("翻譯列寬度");
-        foreach (var width in new[] { 740, 960, 1200 })
+        foreach (var width in new[] { 960, 1200, 1400, 1600 })
         {
             var choice = new ToolStripMenuItem($"{width} 像素") { Checked = Math.Abs(Width - width) < 5 };
             choice.Click += (_, _) => SetTranslationWidth(width);
@@ -993,7 +1136,7 @@ internal sealed class CoachForm : Form
                     return;
                 }
                 var consent = MessageBox.Show(this,
-                    "啟用後，每隔至少 90 秒、確認空閒才邀請跟讀，優先練剛才的教材。\n\n" +
+                    "啟用後先等 30 秒，再依設定間隔邀請；會交替跟讀和看中文用英文回答，優先練剛才的教材。\n\n" +
                     "教練念完後會顯示「麥克風開啟」，使用 Windows 預設麥克風最多 10 秒；" +
                     "5 秒無聲會跳過，說完安靜約 1.2 秒即停止。\n\n" +
                     "收音時不播放教材。收音結束後，辨識若較慢會補一則短知識，再接文字核對回饋。\n\n" +
@@ -1007,8 +1150,8 @@ internal sealed class CoachForm : Form
             }
             _config.Save();
             _speakingFaulted = false;
-            _speakingPlanner.Reset(Environment.TickCount64);
-            SetStatus(_config.AutoSpeakingEnabled ? "自動口說已啟用 · 空閒時約每 90 秒邀請一次" : "自動口說已關閉 · 麥克風關閉");
+            _speakingPlanner.Reset(Environment.TickCount64, initial: true);
+            SetStatus(_config.AutoSpeakingEnabled ? $"自動口說已啟用 · 首次 30 秒後，之後約每 {_config.SpeakingIntervalSeconds} 秒尋找空檔" : "自動口說已關閉 · 麥克風關閉");
         }
         finally { _settingsOpen = false; RestoreGameFocus(); }
     }
@@ -1016,23 +1159,32 @@ internal sealed class CoachForm : Form
     private bool TrySpeaking(LoadSnapshot load)
     {
         var now = Environment.TickCount64;
+        _speakingWaitReason = !_config.AutoSpeakingEnabled ? "尚未啟用自動口說" : _speakingFaulted ? "上次收音失敗，請檢查麥克風後重新開啟教練" :
+            !SpeakingRecognitionService.ModelAvailable ? "缺少口說辨識模型" : !_running ? "教練已關閉" :
+            _gameWindow is null || NativeMethods.GetForegroundWindow() != _gameWindow.Handle ? "等待遊戲回到前景" :
+            !NarrationEnvironmentClear() ? "等待遊戲對話／過場結束" :
+            load.CpuPercent >= 70 ? $"CPU 忙碌（{load.CpuPercent:F0}%）" :
+            load.ActionKeyIdleMs < SpeakingPlanner.ActionQuietMs ? "等待 8 秒未按操作鍵" :
+            _loadMonitor.DialogueKeyIdleMs < SpeakingPlanner.ActionQuietMs ? "剛按過空白鍵，等待對話結束" :
+            _translating ? "等目前翻譯完成" : _speakingPlanner.RemainingMs(now) > 0 ? $"下一次邀請約 {_speakingPlanner.RemainingMs(now) / 1000 + 1} 秒後" :
+            _speechService.IsBusy ? "等教練講完這段" : _captureBusy ? "等本次 OCR 完成" : "等待短暫穩定空檔";
         var safe = SpeakingPlanner.CanStart(_config.AutoSpeakingEnabled && !_previewMode && !_speakingFaulted,
             _gameWindow is not null && NativeMethods.GetForegroundWindow() == _gameWindow.Handle,
             !_running || _settingsOpen || _speakingCts is not null || _translating || !NarrationEnvironmentClear(),
             load.CpuPercent, load.ActionKeyIdleMs, _loadMonitor.DialogueKeyIdleMs, now - _lastDialogueAt);
-        var recent = SpeakingPlanner.FromLesson(_lastIdleLesson);
+        var recent = SpeakingPlanner.FromLesson(_lastIdleLesson is { } last && _idleLessons.CanPractice(last) ? last : null);
         if (recent?.English == _lastSpeakingEnglish) recent = null;
         var prompt = _speakingPlanner.TryNext(now, _config.AutoSpeakingEnabled, safe,
             readyToInvite: !_speechService.IsBusy && !_captureBusy, recentLesson: recent);
         if (prompt is null) return false;
+        if (!_config.SpeakChinese) prompt = prompt with { Recall = false };
         if (!SpeakingRecognitionService.ModelAvailable)
         {
             _speakingFaulted = true;
             SetStatus("口說模型缺少；請重新安裝 speech-model。麥克風未開啟。");
             return false;
         }
-        // A tiny visual sentinel, not OCR, conservatively cancels when the subtitle
-        // region changes. This can also cancel while travelling; safety wins.
+        // Pixel motion triggers a subtitle check, not immediate cancellation.
         _speakingScreen = GetDialogueFingerprint();
         _lastSpeakingScreenCheck = now;
         CancelPersonalization();
@@ -1057,15 +1209,17 @@ internal sealed class CoachForm : Form
             if (_config.SpeakChinese)
                 _ = _speechService.PrepareChineseSpeechAsync(SpeakingBridgeText(prompt), token);
             _keywordsLabel.Text = $"口說示範 · 麥克風關閉\n{prompt.English}\n{prompt.Chinese}（練習句，非任務指令）";
-            SetStatus("先聽一句 · 念完才收音；不回答就略過");
+            SetStatus(prompt.Recall ? "看中文，試著用英文回答 · 問完才收音" : "先聽一句 · 念完才收音；不回答就略過");
             var text = await SpeakingSession.RunAsync(
                 async () =>
                 {
                     if (_config.SpeakChinese && !await _speechService.SpeakChineseAndWaitAsync(
+                        prompt.Recall ? $"換你試試看。「{prompt.Chinese}」用英文怎麼說？" :
                         $"口說練習，意思是：{prompt.Chinese}。先聽，再跟讀。")) return false;
                     if (_skipSpeakingResponse) CancelSpeaking();
                     token.ThrowIfCancellationRequested();
-                    return await _speechService.SpeakEnglishAndWaitAsync(prompt.English);
+                    if (!prompt.Recall && !await _speechService.SpeakEnglishAndWaitAsync(prompt.English)) return false;
+                    return await ConfirmSpeakingQuietAsync();
                 },
                 SpeakingRecognitionService.RecordAsync,
                 (pcm, decodeToken) => SpeakingSession.DecodeWithBridgeAsync(
@@ -1086,7 +1240,7 @@ internal sealed class CoachForm : Form
                         : $"麥克風已關閉 · 本機核對中\n{prompt.English}";
                     SetStatus(listening ? "🎤 正在收音（最多 10 秒）· 按鍵／離開遊戲可中止"
                         : "麥克風已關閉 · 本機辨識中，較慢時穿插相關短教材");
-                    _chineseLabel.Text = listening ? $"🎤 換你說：{prompt.English}（最多 10 秒）" : _translationText;
+                    _chineseLabel.Text = listening ? $"🎤 換你說：{(prompt.Recall ? prompt.Chinese : prompt.English)}（最多 10 秒）" : _translationText;
                 }, token);
             token.ThrowIfCancellationRequested();
             CheckSpeakingSafety();
@@ -1098,7 +1252,8 @@ internal sealed class CoachForm : Form
             // The compact overlay has no teaching column; feedback is spoken once
             // after recording/decode finished and the microphone has closed.
             if (_config.SpeakChinese)
-                await _speechService.SpeakChineseAndWaitAsync($"剛才的口說核對結果：{SpeakingFeedback.Describe(prompt.English, text)}");
+                await _speechService.SpeakChineseAndWaitAsync($"{SpeakingFeedback.Describe(prompt.English, text)}" +
+                    (prompt.Recall ? $" 可以說：{prompt.English}。{prompt.Chinese}" : ""));
             else if (_config.SpeakEnglish)
                 await _speechService.SpeakEnglishAndWaitAsync($"Practice sentence: {prompt.English}");
         }
@@ -1115,6 +1270,7 @@ internal sealed class CoachForm : Form
         finally
         {
             cts.Cancel(); // Cancel optional audio prefetch; never open a late microphone.
+            if (_speakingDialogueCheck is { } check) await check;
             if (ReferenceEquals(_speakingCts, cts))
             {
                 _speakingDemonstration = false;
@@ -1176,10 +1332,38 @@ internal sealed class CoachForm : Form
         try
         {
             var current = GetDialogueFingerprint();
-            if (_speakingScreen is null || current.Zip(_speakingScreen, (a, b) => Math.Abs(a - b)).Average() > 18)
-                DeferOrCancelSpeaking();
+            if (!_speakingCheckBusy && (_speakingScreen is null || current.Zip(_speakingScreen, (a, b) => Math.Abs(a - b)).Average() > 18))
+            {
+                _speakingScreen = current;
+                _ = ConfirmSpeakingQuietAsync();
+            }
         }
         catch { DeferOrCancelSpeaking(); }
+    }
+
+    private Task<bool> ConfirmSpeakingQuietAsync()
+    {
+        if (_speakingCheckBusy && _speakingDialogueCheck is not null) return _speakingDialogueCheck;
+        return _speakingDialogueCheck = CheckDialogueAsync();
+    }
+
+    private async Task<bool> CheckDialogueAsync()
+    {
+        var owner = _speakingCts;
+        if (owner is null || owner.IsCancellationRequested) return false;
+        _speakingCheckBusy = true;
+        try
+        {
+            var text = await RecognizeRegionAsync(CaptureRegionKind.Dialogue);
+            if (!ReferenceEquals(owner, _speakingCts) || owner.IsCancellationRequested) return false;
+            if (!OcrService.LooksLikeCharacterDialogue(text)) return true;
+            _lastDialogueAt = Environment.TickCount64;
+            _narrationGuard.ObserveDialogue(_lastDialogueAt, true);
+            DeferOrCancelSpeaking();
+            return false;
+        }
+        catch { if (ReferenceEquals(owner, _speakingCts)) DeferOrCancelSpeaking(); return false; }
+        finally { _speakingCheckBusy = false; }
     }
 
     private void DeferOrCancelSpeaking()
@@ -1358,9 +1542,9 @@ internal sealed class CoachForm : Form
 
     private static string LearningFocusLabel(string value) => value switch
     {
-        LearningFocusOptions.ToeicFirst => "多益優先",
-        LearningFocusOptions.DigitalIcFirst => "數位 IC 優先",
-        _ => "綜合"
+        LearningFocusOptions.ToeicFirst => "遊戲＋多益延伸",
+        LearningFocusOptions.DigitalIcFirst => "遊戲＋IC 延伸",
+        _ => "遊戲為主"
     };
 
     private static string LearningTopicLabel(string value) => value switch
@@ -1373,6 +1557,9 @@ internal sealed class CoachForm : Form
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         _running = false;
+        _transcriptTimer.Stop();
+        _transcriptTimer.Dispose();
+        _speechService.PlaybackChanged -= OnPlaybackChanged;
         CancelSpeaking();
         _speakingGuard.Stop();
         _runVersion++;
@@ -1523,7 +1710,31 @@ internal sealed class CoachForm : Form
         Application.DoEvents();
         if (_translationViewport.AutoScrollPosition.Y != 0 || _translationViewport.VerticalScroll.Visible || Height != shortHeight)
             return false;
-        _chineseLabel.Text = "翻譯示範：這是一段比較長的對話。新的翻譯列會自動換行，不會只顯示前半句；內容更多時，視窗最多展開四行，其餘文字可用右側捲軸閱讀。\n短句會自動縮回，英文教學與攻略仍然只用語音，不增加其他面板。";
+        _config.ShowCoachTranscript = true;
+        const string translation = "任務翻譯：前往守衛崗哨。";
+        _chineseLabel.Text = translation;
+        var plainHeight = Height;
+        var transcriptText = string.Join("\n", Enumerable.Range(1, 12).Select(n => $"教學 {n}：increase damage 是增加傷害；increase sales 是增加銷售額。"));
+        OnPlaybackChanged(new(100, transcriptText, true));
+        Application.DoEvents();
+        if (!_transcriptShown || !_transcriptViewport.VerticalScroll.Visible || _transcriptLabel.AutoEllipsis ||
+            _chineseLabel.Text != translation || Height <= plainHeight || Height > plainHeight + 100 ||
+            !_transcriptLabel.Text.EndsWith("增加銷售額。")) return false;
+        _transcriptViewport.AutoScrollPosition = new Point(0, 10000);
+        if (_transcriptViewport.AutoScrollPosition.Y >= 0 || _transcriptLabel.Bottom > _transcriptViewport.ClientSize.Height + 1) return false;
+        _config.ShowCoachTranscript = false;
+        RefreshTranscript();
+        Application.DoEvents();
+        if (_transcriptShown || Height != plainHeight || !_transcript.FullText().Contains(transcriptText)) return false;
+        _config.ShowCoachTranscript = true;
+        OnPlaybackChanged(new(100, transcriptText, false, true));
+        if (_nextNarrationAt < Environment.TickCount64 + 4_000) return false;
+        _transcript.Observe(new(100, transcriptText, false, true), Environment.TickCount64 - 9000);
+        RefreshTranscript();
+        if (_transcriptShown) return false;
+        OnPlaybackChanged(new(101, "接著剛才遊戲裡的 increase。例句：This effect increases skill damage. 整句意思是：這個效果會增加技能傷害。increase 是增加；先看它增加的是哪個數值。", true));
+        Application.DoEvents();
+        if (_transcriptViewport.AutoScrollPosition.Y != 0 || _transcriptLabel.Text.Contains("教學 12")) return false;
         _keywordsLabel.Text = "口說示範 · 麥克風關閉\nWhere should I go next?\n我接下來該去哪裡？（練習句）";
         SetStatus("預覽 · 任務優先，空閒時邀請口說 · 此預覽不收音");
         return true;
@@ -1546,7 +1757,7 @@ internal sealed class CoachForm : Form
     {
         Location = new Point(
             gameBounds.Left + Math.Max(0, (gameBounds.Width - Width) / 2),
-            Math.Max(gameBounds.Top, gameBounds.Bottom - Height - 10));
+            Math.Max(gameBounds.Top, Math.Min(gameBounds.Bottom, Screen.FromRectangle(gameBounds).WorkingArea.Bottom) - Height - 2));
         ClampToVisibleScreen();
     }
 

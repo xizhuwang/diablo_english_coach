@@ -22,7 +22,7 @@ internal static class SpeakingSelfTest
         checks["speaking_safe_gate"] = SpeakingPlanner.CanStart(true, true, false, 30, 20000, 20000, 20000);
         checks["speaking_blocks_dialogue"] = !SpeakingPlanner.CanStart(true, true, false, 30, 20000, 20000, 3000);
         checks["speaking_blocks_pending_work"] = !SpeakingPlanner.CanStart(true, true, true, 30, 20000, 20000, 20000);
-        checks["speaking_blocks_load"] = !SpeakingPlanner.CanStart(true, true, false, 60, 20000, 20000, 20000);
+        checks["speaking_blocks_load"] = !SpeakingPlanner.CanStart(true, true, false, 72, 20000, 20000, 20000);
         checks["speaking_interrupts_space"] = SpeakingPlanner.ShouldInterrupt(true, true, false, 30, 20000, 100);
         checks["speaking_interrupts_combat"] = SpeakingPlanner.ShouldInterrupt(true, true, false, 30, 100, 20000);
         checks["speaking_interrupts_focus"] = SpeakingPlanner.ShouldInterrupt(true, false, false, 30, 20000, 20000);
@@ -32,9 +32,9 @@ internal static class SpeakingSelfTest
         checks["speaking_endpoint"] = SpeakingRecognitionService.ShouldEndRecording(3.3, true, 2);
         checks["speaking_hard_cap"] = SpeakingRecognitionService.ShouldEndRecording(10, true, 9.9);
         checks["speaking_does_not_cut_active_phrase"] = !SpeakingRecognitionService.ShouldEndRecording(3, true, 2.8);
-        checks["speaking_exact_not_pronunciation_score"] = SpeakingFeedback.Describe("I need help.", "i need help").Contains("不代表發音");
+        checks["speaking_exact_reports_words_without_scoring"] = SpeakingFeedback.Describe("I need help.", "i need help") == "聽到的字和練習句一致，這句說完整了！";
         checks["speaking_missing_word"] = SpeakingFeedback.Describe("I need your help.", "i need help").Contains("your");
-        checks["speaking_order_matters"] = SpeakingFeedback.Describe("I need help.", "help need i").Contains("可能沒聽清");
+        checks["speaking_order_matters"] = SpeakingFeedback.Describe("I need help.", "help need i").Contains("這次沒聽清");
         checks["speaking_repeated_word"] = SpeakingFeedback.Describe("Go go now.", "go now").Contains("go");
         checks["speaking_empty_is_skip"] = SpeakingFeedback.Describe("Hello.", "").Contains("先繼續玩");
         var busyVoicePlanner = new SpeakingPlanner();

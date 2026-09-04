@@ -29,7 +29,7 @@ internal sealed partial class OcrService
         RecognizerLanguage = preferred.LanguageTag;
     }
 
-    public async Task<string> RecognizeAsync(Bitmap bitmap, CancellationToken cancellationToken)
+    public async Task<string> RecognizeAsync(Bitmap bitmap, CancellationToken cancellationToken, bool dialogue = false)
     {
         await using var memory = new MemoryStream();
         bitmap.Save(memory, ImageFormat.Png);
@@ -43,8 +43,13 @@ internal sealed partial class OcrService
         using var softwareBitmap = await decoder.GetSoftwareBitmapAsync().AsTask(cancellationToken);
         var result = await _engine.RecognizeAsync(softwareBitmap).AsTask(cancellationToken);
         // A single chat/ad line must not poison an otherwise useful subtitle.
-        return Clean(string.Join(" ", result.Lines.Select(line => line.Text)
-            .Where(line => !IsChatOrAdvertising(line))));
+        return DialogueText.Normalize(result.Lines.Select(line =>
+        {
+            var boxes = line.Words.Select(w => w.BoundingRect).ToArray();
+            return boxes.Length == 0 ? new SubtitleLine(line.Text) : new SubtitleLine(line.Text,
+                boxes.Min(b => b.Top), boxes.Max(b => b.Bottom) - boxes.Min(b => b.Top),
+                boxes.Max(b => b.Right) - boxes.Min(b => b.Left));
+        }), dialogue);
     }
 
     public static string Clean(string text)
@@ -67,6 +72,17 @@ internal sealed partial class OcrService
         var latin = text.Count(character => character is >= 'A' and <= 'Z' or >= 'a' and <= 'z');
         var words = WordRegex().Matches(text).Count;
         return words >= 2 && letters > 0 && latin / (double)letters >= 0.65;
+    }
+
+    internal static bool LooksLikeCharacterDialogue(string text)
+    {
+        if (!LooksLikeEnglishSubtitle(text)) return false;
+        if (Regex.IsMatch(text, @"\b(?:I|me|my|mine|we|us|our|ours|you|your|yours)\b", RegexOptions.IgnoreCase) ||
+            text.Contains('?')) return true;
+        // Persistent action buttons and quest imperatives inside an imperfect ROI
+        // may need translation, but must not silence teaching or microphone invites.
+        return !Regex.IsMatch(text, @"^(?:Head|Go|Leave|Return|Talk|Search|Defeat|Collect|Equip|Click|Press|Tap|Hold|Use|Upgrade|Enter|Follow|Open|Close|Claim|Select|Choose)\b", RegexOptions.IgnoreCase) &&
+            WordRegex().Matches(text).Count >= 5;
     }
 
     internal static bool IsChatOrAdvertising(string text) =>

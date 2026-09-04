@@ -66,8 +66,13 @@ internal static class BuildGuideSelfTest
         checks["guide_corruption_recovers_backup"] = new BuildGuideCache(cachePath).Current.ContentHash == saved.ContentHash;
         checks["guide_unsupported_class_no_advice"] = cache.Lesson(new CoachConfig { PlayerClass = "Wizard" }, 0) is null;
         checks["guide_disabled_no_advice"] = cache.Lesson(new CoachConfig { BuildTipsEnabled = false }, 0) is null;
-        checks["guide_no_owned_equipment_claim"] = cache.Lesson(new CoachConfig(), 2)!.Chinese.Contains("不代表你已持有");
-        checks["guide_no_latest_claim"] = cache.Lesson(new CoachConfig(), 0)!.Title.Contains("非最新保證");
+        checks["guide_no_owned_equipment_claim"] = cache.Lesson(new CoachConfig(), 2)!.Chinese.Contains("拿到時");
+        checks["guide_source_date_in_settings"] = cache.Status.Contains(cache.Current.SourceUpdatedAt.ToString("yyyy-MM-dd"));
+        checks["guide_speech_no_boilerplate"] = Enumerable.Range(0, 4).All(i =>
+        {
+            var spoken = LessonScript.Narrate(cache.Lesson(new CoachConfig(), i)!);
+            return !spoken.Contains("為準") && !spoken.Contains("保證") && !spoken.Contains("不是新的任務") && !spoken.Contains("不代表你已持有");
+        });
         return checks;
     }
 

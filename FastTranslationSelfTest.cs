@@ -60,6 +60,8 @@ internal static class FastTranslationSelfTest
             };
             using (var service = new FastTranslationService(new HttpClient(handler), path, () => "test-secret"))
             {
+                var repaired = await service.TranslateAsync("Deckard Cain\nI need y0ur help.", false, azure, default);
+                checks["ocr_repairs_before_fast_translation"] = repaired.Text == "我需要你的幫忙。" && handler.Calls == 0;
                 var offline = await service.TranslateAsync("There is danger nearby.", false,
                     new CoachConfig { TranslationProvider = TranslationProviders.Disabled }, default);
                 checks["offline_sends_nothing"] = handler.Calls == 0 && offline.Text is null;
@@ -68,6 +70,7 @@ internal static class FastTranslationSelfTest
                 var result = await service.TranslateAsync("There is danger nearby.", false, azure, default);
                 var cached = await service.TranslateAsync("There is danger nearby.", false, azure, default);
                 checks["online_translation_and_cache"] = result.Text == "附近有危險。" && cached.Text == result.Text && handler.Calls == 1;
+                checks["azure_text_sample"] = result.Text ?? "null";
                 checks["azure_official_endpoint"] = handler.LastUri is { } uri &&
                     uri.Host == "api.cognitive.microsofttranslator.com" && uri.AbsolutePath == "/translate";
                 checks["secret_not_in_uri"] = handler.LastUri is not null && !handler.LastUri.ToString().Contains("test-secret");
@@ -102,6 +105,7 @@ internal static class FastTranslationSelfTest
                 var partials = new List<string>();
                 var result = await localService.TranslateAsync("The skill deals damage.", false, local, default, partials.Add);
                 checks["streaming_shows_chinese_before_completion"] = partials.Count > 0 && partials[0] == "這個技能" && result.FirstTextMs is not null;
+                checks["streaming_text_samples"] = partials;
                 checks["streaming_requested"] = JsonDocument.Parse(localHandler.LastBody).RootElement.GetProperty("stream").GetBoolean();
                 var cached = await localService.TranslateAsync("The skill deals damage.", false, local, default);
                 checks["local_model_translation_and_cache"] = result.Text == "這個技能造成傷害。" &&
@@ -174,6 +178,7 @@ internal static class FastTranslationSelfTest
         var passed = true;
         var samples = new (string Text, bool Quest)[]
         {
+            ("Deckard Cain\nI need y0ur help.", false),
             ("Head Forward and Search for Leoric.", true),
             ("This effect increases the damage dealt by your summons.", false),
             ("I need your help. Follow me and stay close.", false),

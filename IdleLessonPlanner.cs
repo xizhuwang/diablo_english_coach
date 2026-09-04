@@ -3,12 +3,13 @@ using System.Text.RegularExpressions;
 
 namespace DiabloEnglishCoach;
 
-internal sealed record IdleLesson(string Title, string English, string Chinese, string Topic = "game", string SentenceMeaning = "");
+internal sealed record IdleLesson(string Title, string English, string Chinese, string Topic = "game", string SentenceMeaning = "", string AnchorWord = "");
 
 internal sealed record LessonPersonalizationContext(
     string Topic,
     string RecentLessons,
-    string EncounteredWords);
+    string EncounteredWords,
+    string AnchorWord = "");
 
 // The local curriculum keeps narration available while the model prepares a
 // personalized item. Generated lessons are cached locally and exact/nearby
@@ -32,35 +33,28 @@ internal sealed class IdleLessonPlanner
     private int _lessonIndex;
     private int _wordIndex;
     private int _tipIndex;
-    private int _toeicIndex;
-    private int _icIndex;
     private int _gameIndex;
     private int _topicIndex;
+    private IReadOnlyList<GameWordLink> _links = Array.Empty<GameWordLink>();
+    private int _lastExtensionTurn = -4;
+    private int _contextIndex;
 
-    private static readonly IdleLesson[] ToeicLessons =
-    [
-        new("多益核心字", "Please confirm the delivery schedule.", "confirm＝確認；schedule＝時程。商務郵件常用 confirm 來核對時間。", "toeic"),
-        new("多益核心字", "The meeting has been postponed.", "postpone＝延期。has been postponed 表示會議已被延期。", "toeic"),
-        new("多益核心字", "Employees must comply with the policy.", "comply with＝遵守。後面常接 policy、rule 或 regulation。", "toeic"),
-        new("多益核心字", "The position requires relevant experience.", "require＝需要；relevant＝相關的。職缺說明裡很常見。", "toeic"),
-        new("多益核心字", "We appreciate your prompt response.", "appreciate＝感謝；prompt＝迅速的。這是正式郵件常見用法。", "toeic"),
-        new("多益核心字", "The device is temporarily unavailable.", "temporarily＝暫時地；unavailable＝無法使用的。", "toeic"),
-        new("多益核心字", "Sales increased significantly this quarter.", "significantly＝顯著地；quarter＝季度。留意副詞修飾 increased。", "toeic"),
-        new("多益核心字", "Submit the form before the deadline.", "submit＝提交；deadline＝截止期限。before 後面接時間點。", "toeic")
-    ];
+    public void ObserveGameContext(string dialogue, string quest)
+    {
+        _links = GameContextLessons.Find(dialogue, quest);
+        var keep = _generated.Where(Relevant).ToArray();
+        _generated.Clear();
+        foreach (var lesson in keep) _generated.Enqueue(lesson);
+    }
 
-    private static readonly IdleLesson[] DigitalIcLessons =
-    [
-        new("數位 IC 面試字", "Explain the difference between latency and throughput.", "latency＝延遲；throughput＝吞吐量。面試時先分別定義，再舉例比較。", "ic"),
-        new("數位 IC 面試字", "A flip-flop stores one bit of state.", "flip-flop＝正反器；state＝狀態。描述時可用 store one bit。", "ic"),
-        new("數位 IC 面試字", "Setup time is checked before the clock edge.", "setup time＝建立時間；clock edge＝時脈邊緣。before 是關鍵方向字。", "ic"),
-        new("數位 IC 面試字", "Hold time is checked after the clock edge.", "hold time＝保持時間。可和 setup time 的 before／after 對照記憶。", "ic"),
-        new("數位 IC 面試字", "Use nonblocking assignments in sequential logic.", "nonblocking assignment＝非阻塞賦值；sequential logic＝循序邏輯。", "ic"),
-        new("數位 IC 面試字", "Combinational logic should avoid unintended latches.", "combinational＝組合的；unintended latch＝非預期鎖存器。", "ic"),
-        new("數位 IC 面試字", "A synchronizer reduces metastability risk.", "synchronizer＝同步器；metastability＝亞穩態。回答時說 reduces risk，不要說完全消除。", "ic"),
-        new("數位 IC 面試字", "Pipelining can improve the maximum clock frequency.", "pipelining＝管線化；clock frequency＝時脈頻率。也要能說明 latency 的取捨。", "ic")
-    ];
+    private bool GameMeaningTaught(string word) => _recent.Any(l => l.AnchorWord == word && l.Topic == "game");
 
+    private bool Relevant(IdleLesson lesson) => _links.Any(l => l.Word == lesson.AnchorWord) &&
+        GameContextLessons.Allows(lesson.AnchorWord, lesson.Topic) &&
+        GameContextLessons.SafeExample(lesson.AnchorWord, lesson.English, lesson.SentenceMeaning);
+
+    public bool CanPractice(IdleLesson lesson) => string.IsNullOrEmpty(lesson.AnchorWord)
+        ? lesson.Topic == "game" : Relevant(lesson);
     private static readonly IdleLesson[] GameLessons =
     [
         new("遊戲英文", "Head to the marked area.", "head to＝前往；marked area＝標記區域。先抓任務句中的動詞。", "game"),
@@ -76,12 +70,12 @@ internal sealed class IdleLessonPlanner
     public IdleLessonPlanner(string? cachePath = null, bool persistGenerated = true)
     {
         _cachePath = persistGenerated
-            ? cachePath ?? Path.Combine(CoachConfig.FolderPath, "personalized-lessons-v2.json")
+            ? cachePath ?? Path.Combine(CoachConfig.FolderPath, "personalized-lessons-v3.json")
             : null;
         LoadGenerated();
     }
 
-    public bool NeedsPersonalizedLesson => _generated.Count < GeneratedQueueTarget;
+    public bool NeedsPersonalizedLesson => _links.Count > 0 && _generated.Count < GeneratedQueueTarget;
 
     public void Reset(long now)
     {
@@ -105,26 +99,25 @@ internal sealed class IdleLessonPlanner
 
     public LessonPersonalizationContext CreatePersonalizationContext(CoachConfig config)
     {
-        var patterns = config.LearningFocus switch
-        {
-            LearningFocusOptions.ToeicFirst => new[] { "toeic", "toeic", "ic", "game" },
-            LearningFocusOptions.DigitalIcFirst => new[] { "ic", "ic", "toeic", "game" },
-            _ => new[] { "toeic", "ic", "game" }
-        };
-        var topic = patterns[_topicIndex++ % patterns.Length];
+        var preferred = config.LearningFocus == LearningFocusOptions.DigitalIcFirst ? "ic" : "toeic";
+        var choices = _links.OrderByDescending(l => l.ExtensionTopic == preferred).ToArray();
+        var link = choices.Length > 0 ? choices[_topicIndex++ % choices.Length] : null;
+        // Preferences only affect naturally available extensions, never invent a link.
+        var extend = link is { Extension.Length: > 0 } && _topicIndex % 4 == 0 && GameMeaningTaught(link.Word);
+        var topic = extend ? link!.ExtensionTopic : "game";
         var recent = _recent.Count == 0
             ? "none"
             : string.Join(" | ", _recent.TakeLast(8).Select(item => $"{item.Title}: {item.English}"));
         var words = _words.Count == 0
             ? "none yet"
             : string.Join(", ", _words.TakeLast(10).Select(item => $"{item.Word}={item.Meaning}"));
-        return new LessonPersonalizationContext(topic, recent, words);
+        return new LessonPersonalizationContext(topic, recent, words, link?.Word ?? "");
     }
 
     public bool AddPersonalizedLesson(IdleLesson lesson)
     {
         var signature = Signature(lesson.English);
-        if (!Valid(lesson) || _knownGenerated.Contains(signature) ||
+        if (!Valid(lesson) || !Relevant(lesson) || _knownGenerated.Contains(signature) ||
             _recent.Any(item => TooSimilar(item.English, lesson.English)) ||
             _generated.Any(item => TooSimilar(item.English, lesson.English)))
             return false;
@@ -154,8 +147,11 @@ internal sealed class IdleLessonPlanner
 
         _nextDue = now + IntervalMs;
         var turn = _lessonIndex++;
+        // Discard prepared material whose word is no longer on screen/recent.
+        while (_generated.Count > 0 && !Relevant(_generated.Peek())) _generated.Dequeue();
         IdleLesson lesson;
-        if (_generated.Count > 0)
+        if ((turn % 3 != 2 || !config.BuildTipsEnabled) && _generated.Count > 0 && (_generated.Peek().Topic == "game" ||
+            (turn - _lastExtensionTurn >= 4 && GameMeaningTaught(_generated.Peek().AnchorWord))))
             lesson = _generated.Dequeue();
         else if (turn % 5 == 1 && _words.Count >= 3)
         {
@@ -163,7 +159,7 @@ internal sealed class IdleLessonPlanner
             lesson = new("遇過的單字 · 間隔複習", word.Word,
                 $"{word.Word}＝{word.Meaning}。先回想意思，再跟著念一次。", "review");
         }
-        else if (turn % 5 == 3 && config.BuildTipsEnabled)
+        else if (turn % 3 == 2 && config.BuildTipsEnabled)
         {
             var cached = Guides?.Lesson(config, _tipIndex);
             if (cached is not null) { _tipIndex++; lesson = cached; }
@@ -178,25 +174,26 @@ internal sealed class IdleLessonPlanner
             lesson = NextCurriculum(config);
 
         lesson = LessonScript.Complete(lesson);
+        if (lesson.Topic is "toeic" or "ic") _lastExtensionTurn = turn;
         Remember(lesson);
         return lesson;
     }
 
     private IdleLesson NextCurriculum(CoachConfig config)
     {
-        var pattern = config.LearningFocus switch
+        if (_links.Count > 0)
         {
-            LearningFocusOptions.ToeicFirst => new[] { "toeic", "toeic", "ic", "game" },
-            LearningFocusOptions.DigitalIcFirst => new[] { "ic", "ic", "toeic", "game" },
-            _ => new[] { "toeic", "ic", "game" }
-        };
-        var topic = pattern[(_lessonIndex - 1) % pattern.Length];
-        return topic switch
-        {
-            "toeic" => ToeicLessons[_toeicIndex++ % ToeicLessons.Length],
-            "ic" => DigitalIcLessons[_icIndex++ % DigitalIcLessons.Length],
-            _ => GameLessons[_gameIndex++ % GameLessons.Length]
-        };
+            var preferred = config.LearningFocus == LearningFocusOptions.DigitalIcFirst ? "ic" : "toeic";
+            var choices = _links.OrderByDescending(l => l.ExtensionTopic == preferred).ToArray();
+            var link = choices[_contextIndex++ % choices.Length];
+            // Explain it IN the game first. Only then is a short shared-word
+            // extension eligible, no more often than every four spoken items.
+            var extend = GameMeaningTaught(link.Word) && link.Extension.Length > 0 && _lessonIndex - 1 - _lastExtensionTurn >= 4 &&
+                !_recent.Any(l => l.AnchorWord == link.Word && l.Topic == link.ExtensionTopic);
+            var candidate = GameContextLessons.Create(link, extend);
+            if (!_recent.TakeLast(3).Any(l => l.English == candidate.English)) return candidate;
+        }
+        return GameLessons[_gameIndex++ % GameLessons.Length];
     }
 
     private void Remember(IdleLesson lesson)
@@ -242,6 +239,7 @@ internal sealed class IdleLessonPlanner
         lesson.English is { Length: >= 3 and <= 180 } &&
         lesson.Chinese is { Length: >= 3 and <= 500 } &&
         lesson.SentenceMeaning is { Length: >= 3 and <= 250 } &&
+        lesson.AnchorWord is { Length: > 0 and <= 40 } &&
         lesson.Chinese.Any(character => character is >= '\u3400' and <= '\u9fff');
 
     private static string Signature(string value) => Regex.Replace(value.ToLowerInvariant(), @"[^a-z0-9]+", " ").Trim();

@@ -25,6 +25,7 @@ internal sealed class CoachConfig
     public bool SpeakChinese { get; set; } = true;
     public bool SpeakEnglish { get; set; }
     public bool ShowOriginal { get; set; } = true;
+    public bool ShowCoachTranscript { get; set; } = true;
     public bool ForceCpuInference { get; set; } = true;
     public int InferenceThreads { get; set; } = 2;
     public bool UseOnlineNeuralVoice { get; set; } = true;
@@ -32,7 +33,10 @@ internal sealed class CoachConfig
     public string EnglishVoice { get; set; } = "en-US-AnaNeural";
     public string LocalChineseVoice { get; set; } = "Microsoft Yating Desktop";
     public string LocalEnglishVoice { get; set; } = "Microsoft Zira Desktop";
-    public int SpeechRatePercent { get; set; } = 18;
+    public int SpeechRatePercent { get; set; } = 0;
+    public int ExperienceVersion { get; set; }
+    public int TeachingPauseSeconds { get; set; } = 12;
+    public int SpeakingIntervalSeconds { get; set; } = 90;
     public int SpeechPitchHz { get; set; } = 4;
     public double WindowOpacity { get; set; } = 0.80;
     public int WindowLeft { get; set; } = -1;
