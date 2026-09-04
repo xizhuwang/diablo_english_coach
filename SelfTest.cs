@@ -6,6 +6,28 @@ namespace DiabloEnglishCoach;
 
 internal static class SelfTest
 {
+    public static bool CaptureUiPreview(string outputPath)
+    {
+        try
+        {
+            // The preview process is terminated immediately by Program after the
+            // bitmap is saved, so avoid WinForms/SAPI teardown influencing this
+            // layout-only test.
+            var form = new CoachForm(previewMode: true);
+            form.Show();
+            Application.DoEvents();
+            using var bitmap = new Bitmap(form.Width, form.Height, PixelFormat.Format32bppArgb);
+            form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? Environment.CurrentDirectory);
+            bitmap.Save(outputPath, ImageFormat.Png);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static async Task<bool> GenerateVoiceSampleAsync(string outputPath, string voice, string text)
     {
         try

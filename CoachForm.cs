@@ -29,16 +29,22 @@ internal sealed class CoachForm : Form
     private readonly Button _speakEnglishButton = new();
     private readonly Button _speakChineseButton = new();
     private readonly Button _voiceButton = new();
+    private readonly Button _opacityButton = new();
+    private readonly Button _collapseButton = new();
+    private readonly Panel _contentPanel = new();
+    private const int ExpandedHeight = 158;
+    private const int CompactHeight = 38;
 
-    public CoachForm()
+    public CoachForm(bool previewMode = false)
     {
         _ocrService = new OcrService();
-        _speechService = new SpeechService(_config);
+        _speechService = new SpeechService(_config, initializeLocalVoice: !previewMode);
         _speechService.StatusChanged += message => SetStatus(message);
         InitializeUi();
         _scanTimer.Interval = Math.Clamp(_config.ScanIntervalMs, 700, 5000);
         _scanTimer.Tick += ScanTimerTick;
-        Shown += OnShown;
+        if (!previewMode)
+            Shown += OnShown;
         FormClosing += OnFormClosing;
     }
 
@@ -46,78 +52,147 @@ internal sealed class CoachForm : Form
     {
         base.OnHandleCreated(eventArgs);
         NativeMethods.SetWindowDisplayAffinity(Handle, NativeMethods.WdaExcludeFromCapture);
+        ApplyRoundedCorners();
     }
 
     private void InitializeUi()
     {
         Text = "Diablo English Coach";
-        Size = new Size(570, 420);
-        MinimumSize = new Size(500, 330);
         StartPosition = FormStartPosition.Manual;
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
-        Location = new Point(Math.Max(area.Left, area.Right - Width - 18), area.Top + 18);
+        var overlayWidth = Math.Clamp((int)Math.Round(area.Width * 0.64), 780, 1280);
+        Size = new Size(overlayWidth, _config.CompactMode ? CompactHeight : ExpandedHeight);
+        MinimumSize = new Size(700, CompactHeight);
+        MaximumSize = new Size(1600, ExpandedHeight);
+        var defaultLocation = new Point(area.Left + (area.Width - Width) / 2, area.Top + 10);
+        Location = SavedLocationIsVisible(area)
+            ? new Point(_config.WindowLeft, _config.WindowTop)
+            : defaultLocation;
         TopMost = true;
+        ShowInTaskbar = false;
+        Opacity = Math.Clamp(_config.WindowOpacity, 0.55, 1.0);
         BackColor = Color.FromArgb(22, 24, 31);
         ForeColor = Color.WhiteSmoke;
-        Font = new Font("Microsoft JhengHei UI", 10);
-        FormBorderStyle = FormBorderStyle.SizableToolWindow;
+        Font = new Font("Microsoft JhengHei UI", 9);
+        FormBorderStyle = FormBorderStyle.None;
+        Padding = new Padding(1);
+        Resize += (_, _) => ApplyRoundedCorners();
 
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(12),
+            Padding = new Padding(7, 4, 7, 5),
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 2,
             BackColor = BackColor
         };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 26));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 22));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 27));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 29));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
+
+        var topBar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            Margin = new Padding(0),
+            BackColor = BackColor
+        };
+        topBar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 145));
+        topBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        topBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        root.Controls.Add(topBar, 0, 0);
 
         var title = new Label
         {
-            Text = "DIABLO · ENGLISH COACH",
-            AutoSize = true,
-            Font = new Font("Segoe UI", 14, FontStyle.Bold),
+            Text = "◆ ENGLISH COACH",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
             ForeColor = Color.FromArgb(255, 205, 76),
-            Margin = new Padding(0, 0, 0, 8)
+            Margin = new Padding(2, 0, 4, 0),
+            Cursor = Cursors.SizeAll
         };
-        root.Controls.Add(title, 0, 0);
+        title.MouseDown += DragOverlay;
+        topBar.Controls.Add(title, 0, 0);
 
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, Margin = new Padding(0, 0, 0, 8) };
-        ConfigureButton(_startButton, "開始自動教學", (_, _) => ToggleRunning());
-        ConfigureButton(_regionButton, "框選字幕區", (_, _) => PickRegion());
-        ConfigureButton(_testButton, "測試辨識", async (_, _) => await TestCaptureAsync());
-        ConfigureButton(_speakEnglishButton, "🔊 英文", (_, _) => _speechService.SpeakEnglish(_originalLabel.Text));
-        ConfigureButton(_speakChineseButton, "🔊 中文", (_, _) => _speechService.SpeakTraditionalChinese(_chineseLabel.Text));
-        ConfigureButton(_voiceButton, "聲音設定", (_, _) => OpenVoiceSettings());
-        toolbar.Controls.AddRange(new Control[] { _startButton, _regionButton, _testButton, _speakEnglishButton, _speakChineseButton, _voiceButton });
-        root.Controls.Add(toolbar, 0, 1);
-
-        ConfigureContentLabel(_originalLabel, "等待英文字幕……", Color.WhiteSmoke, 11, FontStyle.Bold);
-        ConfigureContentLabel(_simpleLabel, "簡單英文會顯示在這裡", Color.FromArgb(147, 197, 253), 10, FontStyle.Regular);
-        ConfigureContentLabel(_chineseLabel, "繁體中文會顯示在這裡", Color.FromArgb(167, 243, 208), 11, FontStyle.Regular);
-        ConfigureContentLabel(_keywordsLabel, "重點單字會顯示在這裡", Color.FromArgb(253, 230, 138), 10, FontStyle.Regular);
-        root.Controls.Add(WrapSection("原句", _originalLabel), 0, 2);
-        root.Controls.Add(WrapSection("簡單英文", _simpleLabel), 0, 3);
-        root.Controls.Add(WrapSection("繁中（只解釋當前句）", _chineseLabel), 0, 4);
-        root.Controls.Add(WrapSection("最多 3 個重點", _keywordsLabel), 0, 5);
-
-        _statusLabel.AutoSize = true;
+        _statusLabel.Dock = DockStyle.Fill;
+        _statusLabel.AutoEllipsis = true;
+        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
         _statusLabel.ForeColor = Color.FromArgb(156, 163, 175);
         _statusLabel.Text = $"OCR：{_ocrService.RecognizerLanguage} · 未啟動";
-        _statusLabel.Margin = new Padding(0, 8, 0, 0);
-        root.Controls.Add(_statusLabel, 0, 6);
+        _statusLabel.Margin = new Padding(0);
+        _statusLabel.Cursor = Cursors.SizeAll;
+        _statusLabel.MouseDown += DragOverlay;
+        topBar.Controls.Add(_statusLabel, 1, 0);
+
+        var toolbar = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            Margin = new Padding(4, 0, 0, 0)
+        };
+        var tips = new ToolTip { InitialDelay = 250, ReshowDelay = 100 };
+        ConfigureCompactButton(_startButton, "▶", "開始／暫停自動教學", (_, _) => ToggleRunning(), tips);
+        ConfigureCompactButton(_regionButton, "範圍", "重新框選字幕區", (_, _) => PickRegion(), tips);
+        ConfigureCompactButton(_testButton, "測試", "測試目前字幕辨識", async (_, _) => await TestCaptureAsync(), tips);
+        ConfigureCompactButton(_speakEnglishButton, "EN", "朗讀英文原句", (_, _) => _speechService.SpeakEnglish(_originalLabel.Text), tips);
+        ConfigureCompactButton(_speakChineseButton, "中", "朗讀繁中翻譯", (_, _) => _speechService.SpeakTraditionalChinese(_chineseLabel.Text), tips);
+        ConfigureCompactButton(_voiceButton, "聲音", "選擇聲線與語速", (_, _) => OpenVoiceSettings(), tips);
+        ConfigureCompactButton(_opacityButton, $"{Opacity:P0}", "切換透明度：65%／80%／92%", (_, _) => CycleOpacity(), tips);
+        ConfigureCompactButton(_collapseButton, _config.CompactMode ? "▾" : "▴", "收合／展開教練", (_, _) => ToggleCompactMode(), tips);
+        var closeButton = new Button();
+        ConfigureCompactButton(closeButton, "×", "關閉教練", (_, _) => Close(), tips);
+        closeButton.ForeColor = Color.FromArgb(248, 113, 113);
+        toolbar.Controls.AddRange(new Control[]
+        {
+            _startButton, _regionButton, _testButton, _speakEnglishButton,
+            _speakChineseButton, _voiceButton, _opacityButton, _collapseButton, closeButton
+        });
+        topBar.Controls.Add(toolbar, 2, 0);
+
+        _contentPanel.Dock = DockStyle.Fill;
+        _contentPanel.Margin = new Padding(0, 2, 0, 0);
+        _contentPanel.Visible = !_config.CompactMode;
+        root.Controls.Add(_contentPanel, 0, 1);
+
+        var contentGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            Margin = new Padding(0),
+            BackColor = BackColor
+        };
+        contentGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+        contentGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+        contentGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
+        _contentPanel.Controls.Add(contentGrid);
+
+        ConfigureContentLabel(_originalLabel, "等待英文字幕……", Color.WhiteSmoke, 10, FontStyle.Bold);
+        ConfigureContentLabel(_simpleLabel, "簡單英文會顯示在這裡", Color.FromArgb(147, 197, 253), 9, FontStyle.Regular);
+        ConfigureContentLabel(_chineseLabel, "繁體中文會顯示在這裡", Color.FromArgb(167, 243, 208), 10, FontStyle.Regular);
+        ConfigureContentLabel(_keywordsLabel, "重點單字會顯示在這裡", Color.FromArgb(253, 230, 138), 9, FontStyle.Regular);
+
+        var englishStack = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = new Padding(0, 0, 4, 0) };
+        englishStack.RowStyles.Add(new RowStyle(SizeType.Percent, 56));
+        englishStack.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
+        englishStack.Controls.Add(WrapSection("ENGLISH", _originalLabel), 0, 0);
+        englishStack.Controls.Add(WrapSection("SIMPLE", _simpleLabel), 0, 1);
+        contentGrid.Controls.Add(englishStack, 0, 0);
+        contentGrid.Controls.Add(WrapSection("繁中 · 不爆雷", _chineseLabel), 1, 0);
+        contentGrid.Controls.Add(WrapSection("WORDS", _keywordsLabel), 2, 0);
+
+        ApplyRoundedCorners();
     }
 
     private async void OnShown(object? sender, EventArgs eventArgs)
     {
         _gameWindow = CaptureService.FindDiabloWindow();
+        if (_gameWindow is not null && _config.WindowLeft < 0)
+            PositionOverGameWindow(_gameWindow.ClientBounds);
         var model = await _coachService.CheckAsync(_config, _lifetimeCts.Token);
         var game = _gameWindow is null ? "尚未找到 Diablo Immortal 視窗" : "已找到遊戲視窗";
         SetStatus($"{game} · {model.Message}");
@@ -126,7 +201,7 @@ internal sealed class CoachForm : Form
     private void ToggleRunning()
     {
         _running = !_running;
-        _startButton.Text = _running ? "暫停" : "開始自動教學";
+        _startButton.Text = _running ? "Ⅱ" : "▶";
         _scanTimer.Enabled = _running;
         SetStatus(_running ? "正在等待新的英文字幕……" : "已暫停");
         if (_running)
@@ -306,6 +381,9 @@ internal sealed class CoachForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
+        _config.WindowLeft = Left;
+        _config.WindowTop = Top;
+        _config.Save();
         _scanTimer.Stop();
         _lifetimeCts.Cancel();
         _translationCts?.Cancel();
@@ -315,6 +393,72 @@ internal sealed class CoachForm : Form
     }
 
     private void SetStatus(string text) => _statusLabel.Text = $"OCR：{_ocrService.RecognizerLanguage} · {text}";
+
+    private void CycleOpacity()
+    {
+        Opacity = Opacity < 0.73 ? 0.80 : Opacity < 0.86 ? 0.92 : 0.65;
+        _config.WindowOpacity = Opacity;
+        _opacityButton.Text = $"{Opacity:P0}";
+        _config.Save();
+    }
+
+    private void ToggleCompactMode()
+    {
+        _config.CompactMode = !_config.CompactMode;
+        _contentPanel.Visible = !_config.CompactMode;
+        Height = _config.CompactMode ? CompactHeight : ExpandedHeight;
+        _collapseButton.Text = _config.CompactMode ? "▾" : "▴";
+        _config.Save();
+        ApplyRoundedCorners();
+    }
+
+    private void DragOverlay(object? sender, MouseEventArgs eventArgs)
+    {
+        if (eventArgs.Button != MouseButtons.Left)
+            return;
+        NativeMethods.ReleaseCapture();
+        NativeMethods.SendMessage(Handle, NativeMethods.WmNcLeftButtonDown, NativeMethods.HtCaption, nint.Zero);
+        ClampToVisibleScreen();
+        _config.WindowLeft = Left;
+        _config.WindowTop = Top;
+        _config.Save();
+    }
+
+    private void PositionOverGameWindow(Rectangle gameBounds)
+    {
+        Location = new Point(
+            gameBounds.Left + Math.Max(0, (gameBounds.Width - Width) / 2),
+            gameBounds.Top + 10);
+        ClampToVisibleScreen();
+    }
+
+    private bool SavedLocationIsVisible(Rectangle screenArea)
+    {
+        if (_config.WindowLeft < 0 || _config.WindowTop < 0)
+            return false;
+        var saved = new Rectangle(_config.WindowLeft, _config.WindowTop, Width, CompactHeight);
+        return Rectangle.Intersect(saved, screenArea).Width >= 200;
+    }
+
+    private void ClampToVisibleScreen()
+    {
+        var screen = Screen.FromRectangle(Bounds).WorkingArea;
+        Left = Math.Clamp(Left, screen.Left, Math.Max(screen.Left, screen.Right - Width));
+        Top = Math.Clamp(Top, screen.Top, Math.Max(screen.Top, screen.Bottom - Height));
+    }
+
+    private void ApplyRoundedCorners()
+    {
+        if (Width <= 0 || Height <= 0 || !IsHandleCreated)
+            return;
+        var handle = NativeMethods.CreateRoundRectRgn(0, 0, Width + 1, Height + 1, 18, 18);
+        if (handle == nint.Zero)
+            return;
+        var previous = Region;
+        Region = Region.FromHrgn(handle);
+        NativeMethods.DeleteObject(handle);
+        previous?.Dispose();
+    }
 
     private static double Similar(string first, string second)
     {
@@ -352,17 +496,23 @@ internal sealed class CoachForm : Form
         return builder.ToString();
     }
 
-    private static void ConfigureButton(Button button, string text, EventHandler onClick)
+    private static void ConfigureCompactButton(Button button, string text, string tip, EventHandler onClick, ToolTip toolTip)
     {
         button.Text = text;
-        button.AutoSize = true;
+        button.AutoSize = false;
+        button.Height = 25;
+        button.Width = text is "範圍" or "測試" or "聲音"
+            ? 48
+            : text.Length <= 2 ? 34 : text.Length <= 4 ? 46 : 55;
         button.FlatStyle = FlatStyle.Flat;
-        button.FlatAppearance.BorderColor = Color.FromArgb(75, 85, 99);
+        button.FlatAppearance.BorderSize = 0;
         button.BackColor = Color.FromArgb(38, 42, 52);
         button.ForeColor = Color.WhiteSmoke;
-        button.Padding = new Padding(5, 2, 5, 2);
-        button.Margin = new Padding(0, 0, 7, 6);
+        button.Font = new Font("Microsoft JhengHei UI", 8, FontStyle.Regular);
+        button.Padding = new Padding(1, 0, 1, 0);
+        button.Margin = new Padding(2, 0, 0, 0);
         button.Click += onClick;
+        toolTip.SetToolTip(button, tip);
     }
 
     private static void ConfigureContentLabel(Label label, string text, Color color, float size, FontStyle style)
@@ -372,12 +522,20 @@ internal sealed class CoachForm : Form
         label.Font = new Font("Microsoft JhengHei UI", size, style);
         label.Dock = DockStyle.Fill;
         label.AutoEllipsis = true;
-        label.Padding = new Padding(0, 2, 0, 3);
+        label.Padding = new Padding(5, 1, 5, 2);
     }
 
     private static Control WrapSection(string heading, Control content)
     {
-        var panel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1, Margin = new Padding(0, 3, 0, 3) };
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            RowCount = 2,
+            ColumnCount = 1,
+            Margin = new Padding(2),
+            Padding = new Padding(3, 1, 3, 2),
+            BackColor = Color.FromArgb(30, 33, 42)
+        };
         panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         panel.Controls.Add(new Label
@@ -386,7 +544,7 @@ internal sealed class CoachForm : Form
             AutoSize = true,
             ForeColor = Color.FromArgb(156, 163, 175),
             Font = new Font("Microsoft JhengHei UI", 8, FontStyle.Bold),
-            Margin = new Padding(0)
+            Margin = new Padding(4, 0, 0, 0)
         }, 0, 0);
         panel.Controls.Add(content, 0, 1);
         return panel;

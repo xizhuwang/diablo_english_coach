@@ -22,6 +22,10 @@ internal sealed class CoachConfig
     public string LocalEnglishVoice { get; set; } = "Microsoft Zira Desktop";
     public int SpeechRatePercent { get; set; } = 18;
     public int SpeechPitchHz { get; set; } = 4;
+    public double WindowOpacity { get; set; } = 0.80;
+    public int WindowLeft { get; set; } = -1;
+    public int WindowTop { get; set; } = -1;
+    public bool CompactMode { get; set; }
 
     public static string FolderPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

@@ -19,6 +19,12 @@ internal static class Program
             return;
         }
 
+        if (args.Length >= 2 && args[0].Equals("--ui-preview", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplicationConfiguration.Initialize();
+            Environment.Exit(SelfTest.CaptureUiPreview(Path.GetFullPath(args[1])) ? 0 : 1);
+        }
+
         ApplicationConfiguration.Initialize();
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, eventArgs) =>

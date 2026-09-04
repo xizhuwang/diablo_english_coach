@@ -17,12 +17,14 @@ internal sealed class SpeechService : IDisposable
 
     public event Action<string>? StatusChanged;
 
-    public SpeechService(CoachConfig config)
+    public SpeechService(CoachConfig config, bool initializeLocalVoice = true)
     {
         _config = config;
         _uiContext = SynchronizationContext.Current;
         try
         {
+            if (!initializeLocalVoice)
+                return;
             var type = Type.GetTypeFromProgID("SAPI.SpVoice");
             if (type is not null)
                 _speaker = Activator.CreateInstance(type);

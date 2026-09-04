@@ -6,6 +6,8 @@ namespace DiabloEnglishCoach;
 internal static class NativeMethods
 {
     internal const uint WdaExcludeFromCapture = 0x00000011;
+    internal const int WmNcLeftButtonDown = 0x00A1;
+    internal const int HtCaption = 2;
 
     internal delegate bool EnumWindowsProc(nint windowHandle, nint parameter);
 
@@ -48,4 +50,16 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     internal static extern bool SetWindowDisplayAffinity(nint windowHandle, uint affinity);
+
+    [DllImport("user32.dll")]
+    internal static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    internal static extern nint SendMessage(nint windowHandle, int message, nint wordParameter, nint longParameter);
+
+    [DllImport("gdi32.dll")]
+    internal static extern nint CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
+
+    [DllImport("gdi32.dll")]
+    internal static extern bool DeleteObject(nint objectHandle);
 }
