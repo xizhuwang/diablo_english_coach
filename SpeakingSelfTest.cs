@@ -12,9 +12,9 @@ internal static class SpeakingSelfTest
         checks["speaking_opt_in_default"] = !new CoachConfig().AutoSpeakingEnabled;
         var planner = new SpeakingPlanner();
         planner.Reset(0);
-        checks["speaking_waits_four_minutes"] = planner.TryNext(220_000, true, true) is null;
-        checks["speaking_invites_when_quiet"] = planner.TryNext(240_000, true, true) is not null;
-        checks["speaking_no_burst"] = planner.TryNext(240_001, true, true) is null;
+        checks["speaking_waits_ninety_seconds"] = planner.TryNext(70_000, true, true) is null;
+        checks["speaking_invites_when_quiet"] = planner.TryNext(90_000, true, true) is not null;
+        checks["speaking_no_burst"] = planner.TryNext(90_001, true, true) is null;
         checks["speaking_busy_blocks"] = planner.TryNext(600_000, true, false) is null;
         checks["speaking_new_quiet_window"] = planner.TryNext(601_000, true, true) is null;
         checks["speaking_resumes"] = planner.TryNext(616_000, true, true) is not null;
@@ -37,6 +37,48 @@ internal static class SpeakingSelfTest
         checks["speaking_order_matters"] = SpeakingFeedback.Describe("I need help.", "help need i").Contains("可能沒聽清");
         checks["speaking_repeated_word"] = SpeakingFeedback.Describe("Go go now.", "go now").Contains("go");
         checks["speaking_empty_is_skip"] = SpeakingFeedback.Describe("Hello.", "").Contains("先繼續玩");
+        var busyVoicePlanner = new SpeakingPlanner();
+        busyVoicePlanner.Reset(0);
+        busyVoicePlanner.TryNext(70_000, true, true, readyToInvite: false);
+        checks["speaking_waits_for_paragraph_boundary"] = busyVoicePlanner.TryNext(90_000, true, true, false) is null;
+        var related = SpeakingPlanner.FromLesson(new IdleLesson("多益", "Please confirm the schedule.",
+            "confirm＝確認。schedule＝時程。", "toeic", "請確認時程。"));
+        checks["speaking_not_starved_by_continuous_lessons"] = busyVoicePlanner.TryNext(90_001, true, true,
+            readyToInvite: true, recentLesson: related)?.English == "Please confirm the schedule.";
+        checks["speaking_bridge_is_related_and_short"] = related?.Knowledge == "confirm＝確認";
+        checks["speaking_does_not_repeat_untranslated_lesson"] = SpeakingPlanner.FromLesson(new IdleLesson("x", "Some random sentence.", "單字提示")) is null;
+        checks["speaking_demonstration_audio_allowed"] = CoachForm.SpeakingAudioMayStart(true, true, false, false);
+        checks["speaking_processing_audio_allowed"] = CoachForm.SpeakingAudioMayStart(true, false, true, false);
+        checks["speaking_listening_audio_blocked"] = !CoachForm.SpeakingAudioMayStart(true, false, false, false);
+        checks["speaking_cancelled_audio_blocked"] = !CoachForm.SpeakingAudioMayStart(true, false, true, true);
+
+        var bridges = 0;
+        var fast = await SpeakingSession.DecodeWithBridgeAsync(() => Task.FromResult("fast"),
+            () => { bridges++; return Task.FromResult(true); }, default, 5);
+        checks["fast_decode_never_waits_for_bridge"] = fast == "fast" && bridges == 0;
+        var decoder = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bridgeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bridgeAudio = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var slow = SpeakingSession.DecodeWithBridgeAsync(() => decoder.Task, () =>
+        {
+            bridges++; bridgeStarted.SetResult(); return bridgeAudio.Task;
+        }, default, 5);
+        await bridgeStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        checks["bridge_runs_while_decode_pending"] = bridges == 1 && !decoder.Task.IsCompleted;
+        decoder.SetResult("slow");
+        checks["feedback_waits_for_started_short_paragraph"] = !slow.IsCompleted;
+        bridgeAudio.SetResult(true);
+        checks["bridge_then_feedback_keeps_result"] = await slow == "slow" && bridges == 1;
+
+        using var cancelBridge = new CancellationTokenSource();
+        cancelBridge.Cancel();
+        try
+        {
+            await SpeakingSession.DecodeWithBridgeAsync(() => Task.FromResult("late"),
+                () => { bridges++; return Task.FromResult(true); }, cancelBridge.Token, 5);
+            checks["cancelled_bridge_never_plays"] = false;
+        }
+        catch (OperationCanceledException) { checks["cancelled_bridge_never_plays"] = bridges == 1; }
 
         var micCalls = 0;
         var decodeCalls = 0;

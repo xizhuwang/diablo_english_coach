@@ -15,6 +15,7 @@ internal sealed class SpeechService : IDisposable
     private int _generation;
     private bool _disposed;
     private readonly ParagraphSpeechQueue _paragraphs;
+    private readonly Dictionary<string, byte[]> _preparedAudio = new();
     public bool IsBusy => _paragraphs.IsBusy;
     public Func<bool>? MayStartPlayback { get; set; }
 
@@ -45,6 +46,40 @@ internal sealed class SpeechService : IDisposable
 
     // True only after actual playback ends; never start a mic on a guessed delay.
     public Task<bool> SpeakEnglishAndWaitAsync(string text) => EnqueueSpeech(text, false);
+    public Task<bool> SpeakChineseAndWaitAsync(string text) => EnqueueSpeech(text, true);
+
+    private string AudioKey(string text, bool chinese) =>
+        $"{(chinese ? _config.ChineseVoice : _config.EnglishVoice)}|{_config.SpeechRatePercent}|{_config.SpeechPitchHz}|{text}";
+
+    public bool IsChineseSpeechPrepared(string text) =>
+        !_disposed && (!_config.UseOnlineNeuralVoice || _preparedAudio.ContainsKey(AudioKey(text, true)));
+
+    // Prepare bridge audio during the demonstration, but never play it here.
+    // Processing uses it ONLY if ready, so no extra TTS download delays feedback.
+    public async Task PrepareChineseSpeechAsync(string text, CancellationToken token)
+    {
+        if (_disposed || token.IsCancellationRequested || IsChineseSpeechPrepared(text)) return;
+        var key = AudioKey(text, true);
+        var path = Path.Combine(Path.GetTempPath(), $"diablo-coach-prepared-{Guid.NewGuid():N}.mp3");
+        Task? download = null;
+        try
+        {
+            download = new Communicate(text, voice: _config.ChineseVoice,
+                rate: FormatPercent(_config.SpeechRatePercent), pitch: FormatHertz(_config.SpeechPitchHz)).SaveAsync(path);
+            await download.WaitAsync(TimeSpan.FromSeconds(12), token);
+            if (_disposed || token.IsCancellationRequested || new FileInfo(path).Length > 512_000) return;
+            var bytes = await File.ReadAllBytesAsync(path, token);
+            if (_disposed || token.IsCancellationRequested) return;
+            while (_preparedAudio.Count >= 8) _preparedAudio.Remove(_preparedAudio.Keys.First());
+            _preparedAudio[key] = bytes; // Up to 4 MB, session-only, no microphone data.
+        }
+        catch { /* Optional prefetch must not delay or fault the speaking session. */ }
+        finally
+        {
+            if (download is not null && !download.IsCompleted) _ = CleanLateDownloadAsync(download, path);
+            else TryDelete(path);
+        }
+    }
 
     private Task<bool> EnqueueSpeech(string text, bool chinese) =>
         _disposed || string.IsNullOrWhiteSpace(text) ? Task.FromResult(false) : _paragraphs.Enqueue(text, chinese);
@@ -89,9 +124,14 @@ internal sealed class SpeechService : IDisposable
             var voice = chinese ? _config.ChineseVoice : _config.EnglishVoice;
             var rate = FormatPercent(_config.SpeechRatePercent);
             var pitch = FormatHertz(_config.SpeechPitchHz);
-            var request = new Communicate(text, voice: voice, rate: rate, pitch: pitch);
-            download = request.SaveAsync(path);
-            await download.WaitAsync(TimeSpan.FromSeconds(12));
+            if (_preparedAudio.TryGetValue(AudioKey(text, chinese), out var prepared))
+                await File.WriteAllBytesAsync(path, prepared);
+            else
+            {
+                var request = new Communicate(text, voice: voice, rate: rate, pitch: pitch);
+                download = request.SaveAsync(path);
+                await download.WaitAsync(TimeSpan.FromSeconds(12));
+            }
 
             // Dialogue/cutscene may have started while neural audio downloaded.
             // Nothing is interrupted after actual playback begins.
@@ -266,6 +306,7 @@ internal sealed class SpeechService : IDisposable
         if (_disposed)
             return;
         _disposed = true;
+        _preparedAudio.Clear();
         Stop();
         if (_speaker is not null && Marshal.IsComObject(_speaker))
             Marshal.FinalReleaseComObject(_speaker);

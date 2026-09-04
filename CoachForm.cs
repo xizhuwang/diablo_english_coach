@@ -27,6 +27,9 @@ internal sealed class CoachForm : Form
     private CoachReply? _readyReply;
     private Action? _retryRequest;
     private bool _speakingDemonstration;
+    private bool _speakingProcessing;
+    private IdleLesson? _lastIdleLesson;
+    private string _lastSpeakingEnglish = "";
     private bool _skipSpeakingResponse;
     private readonly System.Windows.Forms.Timer _scanTimer = new();
     private readonly CancellationTokenSource _lifetimeCts = new();
@@ -636,6 +639,9 @@ internal sealed class CoachForm : Form
         if (!_translating && now >= _translationRetryAt && _retryTranslation is { } retry &&
             (retry.Text == _currentDialogue || retry.Text == _currentQuest))
             _ = TranslateVisibleAsync(retry.Text, retry.Quest);
+        // Observe quiet time even while a lesson is playing; reserve the next
+        // paragraph boundary for due speaking instead of starving it with lessons.
+        if (TrySpeaking(load)) return;
         var canSpeak = !load.ShouldDefer && NarrationMayStart() && now - _lastTeachingAt >= 1_000;
         if (canSpeak)
         {
@@ -646,7 +652,6 @@ internal sealed class CoachForm : Form
                     DisplayReply(ready);
             }
             if (!_speechService.IsBusy) TryIdleLesson(load);
-            if (!_speechService.IsBusy && !_coachBusy) TrySpeaking(load);
         }
 
         if (_speakingCts is not null || _translating || _coachBusy || _readyReply is not null ||
@@ -717,8 +722,13 @@ internal sealed class CoachForm : Form
     }
 
     private bool NarrationEnvironmentClear() => _narrationGuard.MayStart(
-        Environment.TickCount64, _running, _settingsOpen, _speakingCts is not null,
+        Environment.TickCount64, _running, _settingsOpen,
+        !SpeakingAudioMayStart(_speakingCts is not null, _speakingDemonstration, _speakingProcessing,
+            _speakingCts?.IsCancellationRequested == true),
         _gameWindow is not null && NativeMethods.GetForegroundWindow() == _gameWindow.Handle);
+
+    internal static bool SpeakingAudioMayStart(bool active, bool demonstrating, bool processing, bool cancelled) =>
+        !active || (!cancelled && (demonstrating || processing));
 
     private bool NarrationMayStart() => !_speechService.IsBusy && NarrationEnvironmentClear();
 
@@ -737,6 +747,7 @@ internal sealed class CoachForm : Form
         var lesson = _idleLessons.TryNext(now, safe, _config, requireQuietWindow: false);
         if (lesson is null)
             return;
+        _lastIdleLesson = lesson;
         // Keep the quest and its translation visible. Supplement only the right column.
         _keywordsLabel.Text = $"{lesson.Title}\n{lesson.English}\n{lesson.Chinese}";
         SetStatus(lesson.Title.StartsWith("AI 個人化", StringComparison.Ordinal)
@@ -982,9 +993,10 @@ internal sealed class CoachForm : Form
                     return;
                 }
                 var consent = MessageBox.Show(this,
-                    "啟用後，每隔至少 4 分鐘、確認空閒才邀請跟讀。\n\n" +
+                    "啟用後，每隔至少 90 秒、確認空閒才邀請跟讀，優先練剛才的教材。\n\n" +
                     "教練念完後會顯示「麥克風開啟」，使用 Windows 預設麥克風最多 10 秒；" +
                     "5 秒無聲會跳過，說完安靜約 1.2 秒即停止。\n\n" +
+                    "收音時不播放教材。收音結束後，辨識若較慢會補一則短知識，再接文字核對回饋。\n\n" +
                     "錄音僅在記憶體中由 Vosk 本機辨識，不存檔、不上傳、不常駐監聽。" +
                     "示範聲音沿用語音設定（自然女聲會傳送示範文字給 Microsoft，不傳你的錄音）。\n\n" +
                     "按鍵、切離遊戲或開設定會取消；滑鼠／手把戰鬥可能漏判。建議戴耳機，" +
@@ -996,7 +1008,7 @@ internal sealed class CoachForm : Form
             _config.Save();
             _speakingFaulted = false;
             _speakingPlanner.Reset(Environment.TickCount64);
-            SetStatus(_config.AutoSpeakingEnabled ? "自動口說已啟用 · 空閒時約每 4 分鐘邀請一次" : "自動口說已關閉 · 麥克風關閉");
+            SetStatus(_config.AutoSpeakingEnabled ? "自動口說已啟用 · 空閒時約每 90 秒邀請一次" : "自動口說已關閉 · 麥克風關閉");
         }
         finally { _settingsOpen = false; RestoreGameFocus(); }
     }
@@ -1006,11 +1018,12 @@ internal sealed class CoachForm : Form
         var now = Environment.TickCount64;
         var safe = SpeakingPlanner.CanStart(_config.AutoSpeakingEnabled && !_previewMode && !_speakingFaulted,
             _gameWindow is not null && NativeMethods.GetForegroundWindow() == _gameWindow.Handle,
-            !_running || _coachBusy || _settingsOpen || _speechService.IsBusy || _speakingCts is not null ||
-            _pendingQuest.Length > 0 || _pendingDialogue.Length > 0 || _readyReply is not null ||
-            now - _lastTeachingAt < 15_000,
+            !_running || _settingsOpen || _speakingCts is not null || _translating || !NarrationEnvironmentClear(),
             load.CpuPercent, load.ActionKeyIdleMs, _loadMonitor.DialogueKeyIdleMs, now - _lastDialogueAt);
-        var prompt = _speakingPlanner.TryNext(now, _config.AutoSpeakingEnabled, safe);
+        var recent = SpeakingPlanner.FromLesson(_lastIdleLesson);
+        if (recent?.English == _lastSpeakingEnglish) recent = null;
+        var prompt = _speakingPlanner.TryNext(now, _config.AutoSpeakingEnabled, safe,
+            readyToInvite: !_speechService.IsBusy && !_captureBusy, recentLesson: recent);
         if (prompt is null) return false;
         if (!SpeakingRecognitionService.ModelAvailable)
         {
@@ -1022,6 +1035,10 @@ internal sealed class CoachForm : Form
         // region changes. This can also cancel while travelling; safety wins.
         _speakingScreen = GetDialogueFingerprint();
         _lastSpeakingScreenCheck = now;
+        CancelPersonalization();
+        _translationCts?.Cancel(); // Keep voice capture/decode light; no new LLM until it ends.
+        _retryRequest = null;
+        _lastSpeakingEnglish = prompt.English;
         var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
         _speakingCts = cts;
         _speakingGuard.Start();
@@ -1035,14 +1052,28 @@ internal sealed class CoachForm : Form
         try
         {
             _speakingDemonstration = true;
+            _speakingProcessing = false;
             _skipSpeakingResponse = false;
+            if (_config.SpeakChinese)
+                _ = _speechService.PrepareChineseSpeechAsync(SpeakingBridgeText(prompt), token);
             _keywordsLabel.Text = $"口說示範 · 麥克風關閉\n{prompt.English}\n{prompt.Chinese}（練習句，非任務指令）";
             SetStatus("先聽一句 · 念完才收音；不回答就略過");
             var text = await SpeakingSession.RunAsync(
-                () => _speechService.SpeakEnglishAndWaitAsync(prompt.English),
-                SpeakingRecognitionService.RecordAsync, SpeakingRecognitionService.RecognizeAsync,
+                async () =>
+                {
+                    if (_config.SpeakChinese && !await _speechService.SpeakChineseAndWaitAsync(
+                        $"口說練習，意思是：{prompt.Chinese}。先聽，再跟讀。")) return false;
+                    if (_skipSpeakingResponse) CancelSpeaking();
+                    token.ThrowIfCancellationRequested();
+                    return await _speechService.SpeakEnglishAndWaitAsync(prompt.English);
+                },
+                SpeakingRecognitionService.RecordAsync,
+                (pcm, decodeToken) => SpeakingSession.DecodeWithBridgeAsync(
+                    () => SpeakingRecognitionService.RecognizeAsync(pcm, decodeToken),
+                    () => PlaySpeakingBridgeAsync(prompt, decodeToken), decodeToken),
                 listening =>
                 {
+                    if (!listening) _speakingProcessing = true;
                     CheckSpeakingSafety();
                     if (listening)
                     {
@@ -1054,7 +1085,7 @@ internal sealed class CoachForm : Form
                         ? $"🎤 麥克風開啟 · 換你說\n{prompt.English}\n{prompt.Chinese} · 不說話就跳過"
                         : $"麥克風已關閉 · 本機核對中\n{prompt.English}";
                     SetStatus(listening ? "🎤 正在收音（最多 10 秒）· 按鍵／離開遊戲可中止"
-                        : "麥克風已關閉 · OCR／翻譯仍暫停，避免搶 CPU");
+                        : "麥克風已關閉 · 本機辨識中，較慢時穿插相關短教材");
                     _chineseLabel.Text = listening ? $"🎤 換你說：{prompt.English}（最多 10 秒）" : _translationText;
                 }, token);
             token.ThrowIfCancellationRequested();
@@ -1066,23 +1097,28 @@ internal sealed class CoachForm : Form
             SetStatus("口說完成 · 麥克風關閉 · 文字核對非發音評分");
             // The compact overlay has no teaching column; feedback is spoken once
             // after recording/decode finished and the microphone has closed.
-            SpeakLesson(prompt.English, SpeakingFeedback.Describe(prompt.English, text));
+            if (_config.SpeakChinese)
+                await _speechService.SpeakChineseAndWaitAsync($"剛才的口說核對結果：{SpeakingFeedback.Describe(prompt.English, text)}");
+            else if (_config.SpeakEnglish)
+                await _speechService.SpeakEnglishAndWaitAsync($"Practice sentence: {prompt.English}");
         }
         catch (OperationCanceledException) { /* No late feedback after cancellation. */ }
         catch (Exception exception)
         {
             if (!token.IsCancellationRequested && !IsDisposed)
             {
-                _speakingFaulted = true; // Do not repeat device/permission errors every four minutes.
+                _speakingFaulted = true; // Do not repeatedly retry device/permission errors.
                 _keywordsLabel.Text = "口說暫停，麥克風已關閉。請檢查預設麥克風／桌面應用程式麥克風權限，再關閉並重新開啟教練。";
                 SetStatus($"口說暫停：{exception.Message}");
             }
         }
         finally
         {
+            cts.Cancel(); // Cancel optional audio prefetch; never open a late microphone.
             if (ReferenceEquals(_speakingCts, cts))
             {
                 _speakingDemonstration = false;
+                _speakingProcessing = false;
                 _speakingGuard.Stop();
                 _speakingCts = null;
                 _chineseLabel.Text = _translationText;
@@ -1096,6 +1132,20 @@ internal sealed class CoachForm : Form
             cts.Dispose();
         }
     }
+
+    private Task<bool> PlaySpeakingBridgeAsync(SpeakingPrompt prompt, CancellationToken token)
+    {
+        var bridge = SpeakingBridgeText(prompt);
+        if (token.IsCancellationRequested || !_speakingProcessing || !NarrationMayStart() ||
+            !_speechService.IsChineseSpeechPrepared(bridge))
+            return Task.FromResult(false);
+        // One already available, related short fact; no new LLM work or recording.
+        return _config.SpeakChinese
+            ? _speechService.SpeakChineseAndWaitAsync(bridge)
+            : Task.FromResult(false);
+    }
+
+    private static string SpeakingBridgeText(SpeakingPrompt prompt) => $"收音已結束。補一個重點：{prompt.Knowledge}";
 
     private void CancelSpeaking()
     {
