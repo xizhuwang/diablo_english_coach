@@ -5,10 +5,19 @@ namespace DiabloEnglishCoach;
 internal sealed class CoachForm : Form
 {
     private readonly CoachConfig _config = CoachConfig.Load();
+    private readonly bool _previewMode;
     private readonly OcrService _ocrService;
     private readonly CoachService _coachService = new();
     private readonly SpeechService _speechService;
     private readonly AdaptiveLoadMonitor _loadMonitor = new();
+    private readonly IdleLessonPlanner _idleLessons = new();
+    private ContextMenuStrip? _settingsMenu;
+    private bool _settingsOpen;
+    private int _runVersion;
+    private long _lastDialogueAt;
+    private CoachReply? _readyReply;
+    private Action? _retryRequest;
+    private bool _speechActive;
     private readonly System.Windows.Forms.Timer _scanTimer = new();
     private readonly CancellationTokenSource _lifetimeCts = new();
     private CancellationTokenSource? _translationCts;
@@ -16,20 +25,18 @@ internal sealed class CoachForm : Form
     private bool _captureBusy;
     private bool _running;
     private bool _positionAtGameOnShown;
-    private bool _interactionInProgress;
     private bool _coachBusy;
     private int _scanSequence;
+    private int _questGuidanceCount;
     private string _candidate = string.Empty;
     private int _candidateCount;
     private string _questCandidate = string.Empty;
     private int _questCandidateCount;
     private string _currentDialogue = string.Empty;
-    private string _currentQuest = string.Empty;
     private string _pendingDialogue = string.Empty;
     private string _pendingQuest = string.Empty;
     private readonly Queue<string> _recentSentences = new();
     private readonly Queue<string> _recentQuests = new();
-    private readonly List<string> _coachConversation = new();
 
     private readonly Label _statusLabel = new();
     private readonly Label _originalLabel = new();
@@ -37,17 +44,14 @@ internal sealed class CoachForm : Form
     private readonly Label _chineseLabel = new();
     private readonly Label _keywordsLabel = new();
     private readonly Button _startButton = new();
-    private readonly Button _regionButton = new();
-    private readonly Button _voiceButton = new();
-    private readonly Button _interactButton = new();
-    private readonly Button _opacityButton = new();
-    private readonly Button _collapseButton = new();
+    private readonly Button _settingsButton = new();
     private readonly Panel _contentPanel = new();
     private const int ExpandedHeight = 158;
     private const int CompactHeight = 38;
 
     public CoachForm(bool previewMode = false)
     {
+        _previewMode = previewMode;
         _ocrService = new OcrService();
         _speechService = new SpeechService(_config, initializeLocalVoice: !previewMode);
         _speechService.StatusChanged += message => SetStatus(message);
@@ -72,7 +76,7 @@ internal sealed class CoachForm : Form
         StartPosition = FormStartPosition.Manual;
         var area = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
         var overlayWidth = Math.Clamp((int)Math.Round(area.Width * 0.64), 780, 1280);
-        Size = new Size(overlayWidth, _config.CompactMode ? CompactHeight : ExpandedHeight);
+        Size = new Size(overlayWidth, ExpandedHeight);
         MinimumSize = new Size(700, CompactHeight);
         MaximumSize = new Size(1600, ExpandedHeight);
         var defaultLocation = new Point(
@@ -150,25 +154,20 @@ internal sealed class CoachForm : Form
             Margin = new Padding(4, 0, 0, 0)
         };
         var tips = new ToolTip { InitialDelay = 250, ReshowDelay = 100 };
-        ConfigureCompactButton(_startButton, "▶", "開始／暫停自動教學", (_, _) => ToggleRunning(), tips);
-        ConfigureCompactButton(_interactButton, "互動", "下一步、英文挑戰與自由提問", (_, _) => ShowInteractionMenu(), tips);
-        ConfigureCompactButton(_regionButton, "範圍", "設定對話區與任務區", (_, _) => ShowRangeMenu(), tips);
-        ConfigureCompactButton(_voiceButton, "聲音", "選擇聲線與語速", (_, _) => OpenVoiceSettings(), tips);
-        ConfigureCompactButton(_opacityButton, $"{Opacity:P0}", "切換透明度：65%／80%／92%", (_, _) => CycleOpacity(), tips);
-        ConfigureCompactButton(_collapseButton, _config.CompactMode ? "▾" : "▴", "收合／展開教練", (_, _) => ToggleCompactMode(), tips);
+        ConfigureCompactButton(_startButton, "開啟", "開啟／關閉自動教練", (_, _) => ToggleRunning(), tips);
+        ConfigureCompactButton(_settingsButton, "設定", "辨識、聲音、顯示與流派設定", (_, _) => ShowSettingsMenu(), tips);
         var closeButton = new Button();
         ConfigureCompactButton(closeButton, "×", "關閉教練", (_, _) => Close(), tips);
         closeButton.ForeColor = Color.FromArgb(248, 113, 113);
         toolbar.Controls.AddRange(new Control[]
         {
-            _startButton, _interactButton, _regionButton,
-            _voiceButton, _opacityButton, _collapseButton, closeButton
+            _startButton, _settingsButton, closeButton
         });
         topBar.Controls.Add(toolbar, 2, 0);
 
         _contentPanel.Dock = DockStyle.Fill;
         _contentPanel.Margin = new Padding(0, 2, 0, 0);
-        _contentPanel.Visible = !_config.CompactMode;
+        _contentPanel.Visible = true;
         root.Controls.Add(_contentPanel, 0, 1);
 
         var contentGrid = new TableLayoutPanel
@@ -196,7 +195,7 @@ internal sealed class CoachForm : Form
         englishStack.Controls.Add(WrapSection("SIMPLE", _simpleLabel), 0, 1);
         contentGrid.Controls.Add(englishStack, 0, 0);
         contentGrid.Controls.Add(WrapSection("繁中 · 不爆雷", _chineseLabel), 1, 0);
-        contentGrid.Controls.Add(WrapSection("WORDS", _keywordsLabel), 2, 0);
+        contentGrid.Controls.Add(WrapSection("WORDS · 空閒教學", _keywordsLabel), 2, 0);
 
         ApplyRoundedCorners();
     }
@@ -214,10 +213,25 @@ internal sealed class CoachForm : Form
     private void ToggleRunning()
     {
         _running = !_running;
-        _startButton.Text = _running ? "Ⅱ" : "▶";
-        _scanTimer.Enabled = _running;
+        _runVersion++;
+        _loadMonitor.SetEnabled(_running);
+        _idleLessons.Reset(Environment.TickCount64);
+        if (!_running)
+        {
+            _translationCts?.Cancel();
+            _retryRequest = null;
+            _readyReply = null;
+            _pendingDialogue = _pendingQuest = string.Empty;
+            _speechService.Stop();
+            _speechActive = false;
+            _recentSentences.Clear();
+            _recentQuests.Clear();
+        }
+        _startButton.Text = _running ? "關閉" : "開啟";
+        _startButton.ForeColor = _running ? Color.FromArgb(248, 113, 113) : Color.FromArgb(167, 243, 208);
+        _scanTimer.Enabled = _running && !_previewMode;
         SetStatus(_running ? "自動負載模式已啟用；戰鬥按鍵時只記錄，空白鍵不會暫緩教學。" : "已暫停");
-        if (_running)
+        if (_running && !_previewMode)
             _ = ScanOnceAsync(force: false);
         BeginInvoke(RestoreGameFocus);
     }
@@ -226,26 +240,26 @@ internal sealed class CoachForm : Form
 
     private async Task ScanOnceAsync(bool force)
     {
-        if (_captureBusy)
+        if (_captureBusy || (!force && (!_running || _settingsOpen)))
             return;
+        var runVersion = _runVersion;
         _captureBusy = true;
 
         try
         {
-            var load = _loadMonitor.Sample(_coachBusy, _interactionInProgress);
+            var load = _loadMonitor.Sample(_coachBusy);
             _scanTimer.Interval = load.ShouldDefer || _coachBusy
                 ? Math.Clamp(_config.BusyScanIntervalMs, 1500, 8000)
                 : Math.Clamp(_config.ScanIntervalMs, 700, 5000);
-            // Do not compete with Ollama while it is using the CPU. Explicit
-            // buttons still start immediately; only background OCR waits.
-            if (_coachBusy && !force)
-                return;
-
             if (_gameWindow is null || !CaptureService.TryRefresh(_gameWindow, out var refreshed))
             {
                 _gameWindow = CaptureService.FindDiabloWindow();
                 if (_gameWindow is null)
                 {
+                    _translationCts?.Cancel();
+                    _speechService.Stop();
+                    _speechActive = false;
+                    _idleLessons.Reset(Environment.TickCount64);
                     SetStatus("找不到 Diablo Immortal。請先開啟遊戲並使用視窗化全螢幕。");
                     return;
                 }
@@ -254,6 +268,25 @@ internal sealed class CoachForm : Form
             {
                 _gameWindow = refreshed;
             }
+
+            var gameForeground = NativeMethods.GetForegroundWindow() == _gameWindow.Handle;
+            if (!force && (!gameForeground || load.ShouldDefer))
+            {
+                _idleLessons.TryNext(Environment.TickCount64, false, _config);
+                if (_speechActive)
+                {
+                    _speechService.Stop();
+                    _speechActive = false;
+                }
+                // CPU load caused by our own inference must not cancel itself.
+                // New action keys or leaving the game do cancel that request.
+                if (_coachBusy && (!gameForeground || load.ActionKeyIdleMs < AdaptiveLoadMonitor.ActiveKeyThresholdMs))
+                    _translationCts?.Cancel();
+                if (!gameForeground)
+                    return;
+            }
+            if (_coachBusy && !force)
+                return;
 
             var dialogueText = await RecognizeRegionAsync(CaptureRegionKind.Dialogue);
             // Quest objectives usually stay on screen much longer than dialogue.
@@ -264,22 +297,43 @@ internal sealed class CoachForm : Form
                 ? await RecognizeRegionAsync(CaptureRegionKind.Quest)
                 : string.Empty;
 
-            var deferCoaching = !force && load.ShouldDefer;
-            var foundDialogue = HandleRecognizedText(dialogueText, CaptureRegionKind.Dialogue, force, deferCoaching, load.Reason);
-            // Quest guidance gets final priority when both regions change in the
-            // same scan because it answers the player's immediate "what now?".
-            var foundQuest = HandleRecognizedText(questText, CaptureRegionKind.Quest, force, deferCoaching, load.Reason);
+            if (IsDisposed || runVersion != _runVersion || (!force && (!_running || _settingsOpen)))
+                return;
 
             if (force)
             {
-                var dialogueStatus = foundDialogue ? "對話✓" : "對話－";
-                var questStatus = !_config.QuestRegionConfigured ? "任務區未設定" : foundQuest ? "任務✓" : "任務－";
-                SetStatus($"辨識測試：{dialogueStatus} · {questStatus}");
+                // Settings diagnostics must not turn the coach on or call LLM/TTS.
+                SetStatus($"辨識測試：對話{(OcrService.LooksLikeEnglishSubtitle(dialogueText) ? "✓" : "－")} · 任務{(OcrService.LooksLikeEnglishSubtitle(questText) ? "✓" : "－")}");
+                _originalLabel.Text = $"QUEST · {questText}";
+                _simpleLabel.Text = dialogueText;
+                return;
             }
-            else if (!deferCoaching && !_coachBusy && !_interactionInProgress)
+
+            // Do not start inference if the player pressed a key during OCR.
+            load = _loadMonitor.Sample(_coachBusy);
+            if (NativeMethods.GetForegroundWindow() != _gameWindow.Handle)
+                return;
+            if (OcrService.LooksLikeEnglishSubtitle(dialogueText))
+                _lastDialogueAt = Environment.TickCount64;
+
+            var deferCoaching = load.ShouldDefer;
+            HandleRecognizedText(dialogueText, CaptureRegionKind.Dialogue, deferCoaching, load.Reason);
+            HandleRecognizedText(questText, CaptureRegionKind.Quest, deferCoaching, load.Reason);
+
+            if (!deferCoaching && !_coachBusy)
             {
-                ProcessDeferredLesson();
+                if (_readyReply is not null)
+                {
+                    var reply = _readyReply;
+                    _readyReply = null;
+                    DisplayReply(reply);
+                }
+                else
+                    ProcessDeferredLesson();
+                TryIdleLesson(load);
             }
+            else
+                _idleLessons.TryNext(Environment.TickCount64, false, _config);
         }
         catch (OperationCanceledException)
         {
@@ -307,21 +361,11 @@ internal sealed class CoachForm : Form
     private bool HandleRecognizedText(
         string text,
         CaptureRegionKind kind,
-        bool force,
         bool deferCoaching,
         string loadReason)
     {
         if (!OcrService.LooksLikeEnglishSubtitle(text))
             return false;
-
-        if (force)
-        {
-            if (kind == CaptureRegionKind.Dialogue)
-                AcceptSubtitle(text, deferCoaching, loadReason);
-            else
-                AcceptQuest(text, deferCoaching, loadReason);
-            return true;
-        }
 
         if (kind == CaptureRegionKind.Dialogue)
         {
@@ -356,53 +400,28 @@ internal sealed class CoachForm : Form
     private void AcceptSubtitle(string text, bool deferCoaching = false, string loadReason = "")
     {
         _currentDialogue = text;
+        _readyReply = null;
+        _retryRequest = null;
         _recentSentences.Enqueue(text);
         while (_recentSentences.Count > 12)
             _recentSentences.Dequeue();
 
-        if (_interactionInProgress)
-            return;
+        _pendingDialogue = text;
         if (deferCoaching)
-        {
-            _pendingDialogue = text;
-            _originalLabel.Text = $"DIALOGUE · {text}";
             SetStatus($"{loadReason} · 已記住新對話，空閒時補充英文。");
-            return;
-        }
-
-        _pendingDialogue = string.Empty;
-        if (_config.SpeakEnglish)
-            _speechService.SpeakEnglish(text);
-
-        StartCoachRequest(
-            text,
-            "讀到新對話；正在做英文教學……",
-            token => _coachService.ExplainAsync(text, _config, token));
     }
 
     private void AcceptQuest(string text, bool deferCoaching = false, string loadReason = "")
     {
-        _currentQuest = text;
+        _readyReply = null;
+        _retryRequest = null;
         _recentQuests.Enqueue(text);
         while (_recentQuests.Count > 12)
             _recentQuests.Dequeue();
 
-        if (_interactionInProgress)
-            return;
+        _pendingQuest = text;
         if (deferCoaching)
-        {
-            _pendingQuest = text;
-            _originalLabel.Text = $"QUEST · {text}";
             SetStatus($"{loadReason} · 已記住新任務，空閒時補充指引。");
-            return;
-        }
-
-        _pendingQuest = string.Empty;
-
-        StartCoachRequest(
-            $"QUEST · {text}",
-            "讀到新任務；正在整理下一步與英文重點……",
-            token => _coachService.GuideQuestAsync(text, _currentDialogue, _config, token));
     }
 
     private void ProcessDeferredLesson()
@@ -411,10 +430,12 @@ internal sealed class CoachForm : Form
         {
             var quest = _pendingQuest;
             _pendingQuest = string.Empty;
+            var includeTip = ShouldIncludeBuildTip();
             StartCoachRequest(
                 $"QUEST · {quest}",
                 "電腦已空閒；正在補充任務指引與英文……",
-                token => _coachService.GuideQuestAsync(quest, _currentDialogue, _config, token));
+                token => _coachService.GuideQuestAsync(
+                    quest, _currentDialogue, _config, token, includeTip));
             return;
         }
 
@@ -422,21 +443,74 @@ internal sealed class CoachForm : Form
         {
             var dialogue = _pendingDialogue;
             _pendingDialogue = string.Empty;
-            if (_config.SpeakEnglish)
-                _speechService.SpeakEnglish(dialogue);
             StartCoachRequest(
                 dialogue,
                 "電腦已空閒；正在補充剛才的英文……",
                 token => _coachService.ExplainAsync(dialogue, _config, token));
+            return;
         }
+        var retry = _retryRequest;
+        _retryRequest = null;
+        retry?.Invoke();
+    }
+
+    private void TryIdleLesson(LoadSnapshot load)
+    {
+        var now = Environment.TickCount64;
+        var safe = _running && !_coachBusy && !_settingsOpen && !load.ShouldDefer &&
+                   load.CpuPercent < 55 && load.ActionKeyIdleMs >= IdleLessonPlanner.QuietWindowMs &&
+                   now - _lastDialogueAt >= 12_000 &&
+                   _pendingQuest.Length == 0 && _pendingDialogue.Length == 0 && _readyReply is null;
+        var lesson = _idleLessons.TryNext(now, safe, _config);
+        if (lesson is null)
+            return;
+        // Keep the quest and its translation visible. Supplement only the right column.
+        _keywordsLabel.Text = $"{lesson.Title}\n{lesson.English}\n{lesson.Chinese}";
+        SetStatus("空閒補充 · 本機教材 · 無額外模型呼叫");
+        SpeakLesson(lesson.English, lesson.Chinese);
+    }
+
+    private void SpeakLesson(string english, string chinese)
+    {
+        if (_config.SpeakChinese)
+            _speechService.SpeakTraditionalChinese(chinese);
+        else if (_config.SpeakEnglish)
+            _speechService.SpeakEnglish(english);
+        _speechActive = _config.SpeakChinese || _config.SpeakEnglish;
+    }
+
+    private void DisplayReply(CoachReply reply)
+    {
+        _originalLabel.Text = reply.Original;
+        _simpleLabel.Text = reply.SimpleEnglish;
+        _chineseLabel.Text = reply.TraditionalChinese;
+        var words = reply.Keywords.Count == 0 ? "這句先不用背新單字" :
+            string.Join("    ", reply.Keywords.Select(keyword => $"{keyword.Word}＝{keyword.Meaning}"));
+        _keywordsLabel.Text = reply.Advice is null ? words : $"一般建議 · 非背包分析\n{reply.Advice}";
+        SetStatus(reply.Notice ?? (reply.UsedLocalModel ? "任務與英文教學完成" : "本機基本教學"));
+        _idleLessons.ObserveLesson(Environment.TickCount64, reply.Keywords);
+        SpeakLesson(reply.SimpleEnglish, reply.TraditionalChinese);
+    }
+
+    private bool ShouldIncludeBuildTip()
+    {
+        if (!_config.BuildTipsEnabled)
+            return false;
+        _questGuidanceCount++;
+        return _questGuidanceCount == 1 || _questGuidanceCount % 3 == 0;
     }
 
     private void StartCoachRequest(
         string original,
         string status,
-        Func<CancellationToken, Task<CoachReply>> request,
-        Action<CoachReply>? completed = null)
+        Func<CancellationToken, Task<CoachReply>> request)
     {
+        if (!_running || _settingsOpen || IsDisposed)
+            return;
+        _retryRequest = () => StartCoachRequest(original, status, request);
+        _idleLessons.Reset(Environment.TickCount64);
+        _speechService.Stop();
+        _speechActive = false;
         _originalLabel.Text = original;
         _simpleLabel.Text = "教練正在思考……";
         _chineseLabel.Text = "正在整理不爆雷的說明……";
@@ -448,13 +522,12 @@ internal sealed class CoachForm : Form
         var requestCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
         _translationCts = requestCts;
         _coachBusy = true;
-        _ = ExplainAndDisplayAsync(request(requestCts.Token), requestCts, completed);
+        _ = ExplainAndDisplayAsync(request(requestCts.Token), requestCts);
     }
 
     private async Task ExplainAndDisplayAsync(
         Task<CoachReply> pendingReply,
-        CancellationTokenSource requestCts,
-        Action<CoachReply>? completed)
+        CancellationTokenSource requestCts)
     {
         var cancellationToken = requestCts.Token;
         try
@@ -463,17 +536,16 @@ internal sealed class CoachForm : Form
             if (cancellationToken.IsCancellationRequested)
                 return;
 
-            _originalLabel.Text = reply.Original;
-            _simpleLabel.Text = reply.SimpleEnglish;
-            _chineseLabel.Text = reply.TraditionalChinese;
-            _keywordsLabel.Text = reply.Keywords.Count == 0
-                ? "這句先不用背新單字"
-                : string.Join("    ", reply.Keywords.Select(keyword => $"{keyword.Word}＝{keyword.Meaning}"));
-            SetStatus(reply.Notice ?? (reply.UsedLocalModel ? $"完成 · {_config.Model} · 僅使用當前字幕" : "完成 · 基本離線模式"));
-
-            if (_config.SpeakChinese)
-                _speechService.SpeakTraditionalChinese(reply.TraditionalChinese);
-            completed?.Invoke(reply);
+            if (!_running || IsDisposed)
+                return;
+            _retryRequest = null;
+            // Do not speak a finished result over newly started combat/dialogue.
+            var load = _loadMonitor.Sample(false);
+            if (_settingsOpen || load.ShouldDefer || _gameWindow is null ||
+                NativeMethods.GetForegroundWindow() != _gameWindow.Handle)
+                _readyReply = reply;
+            else
+                DisplayReply(reply);
         }
         catch (OperationCanceledException)
         {
@@ -490,8 +562,11 @@ internal sealed class CoachForm : Form
         }
     }
 
-    private void ShowRangeMenu()
+    private void ShowSettingsMenu()
     {
+        if (_settingsMenu?.Visible == true)
+            return;
+        _settingsMenu?.Dispose();
         var menu = new ContextMenuStrip
         {
             ShowImageMargin = false,
@@ -499,11 +574,88 @@ internal sealed class CoachForm : Form
             ForeColor = Color.WhiteSmoke,
             Font = Font
         };
-        menu.Items.Add("設定對話字幕區", null, (_, _) => PickRegion(CaptureRegionKind.Dialogue));
-        menu.Items.Add("設定任務目標區", null, (_, _) => PickRegion(CaptureRegionKind.Quest));
+        _settingsMenu = menu;
+        _settingsOpen = true;
+        _runVersion++;
+        _translationCts?.Cancel();
+        _speechService.Stop();
+        _speechActive = false;
+        // Retain the menu until the next opening/form shutdown. Disposing in
+        // Closed breaks ToolStrip's own click/close event sequence.
+        menu.Closed += (_, _) =>
+        {
+            _settingsOpen = false;
+            _idleLessons.Reset(Environment.TickCount64);
+        };
+        var recognition = new ToolStripMenuItem("辨識範圍");
+        recognition.DropDownItems.Add("設定對話字幕區", null, (_, _) => PickRegion(CaptureRegionKind.Dialogue));
+        recognition.DropDownItems.Add("設定任務目標區", null, (_, _) => PickRegion(CaptureRegionKind.Quest));
+        recognition.DropDownItems.Add("測試兩個辨識區", null, async (_, _) => await TestCaptureAsync());
+        menu.Items.Add(recognition);
+
+        menu.Items.Add("聲音與語速", null, (_, _) => OpenVoiceSettings());
+
+        var opacity = new ToolStripMenuItem("透明度");
+        foreach (var value in new[] { 0.65, 0.80, 0.92 })
+        {
+            var item = new ToolStripMenuItem($"{value:P0}") { Checked = Math.Abs(Opacity - value) < 0.02 };
+            item.Click += (_, _) => SetOverlayOpacity(value);
+            opacity.DropDownItems.Add(item);
+        }
+        menu.Items.Add(opacity);
+
+        menu.Items.Add("移到遊戲下方中央", null, (_, _) => MoveToSafePosition());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("測試兩個辨識區", null, async (_, _) => await TestCaptureAsync());
-        menu.Show(_regionButton, new Point(0, _regionButton.Height));
+
+        var tipsEnabled = new ToolStripMenuItem("自動提供流派／裝備提示")
+        {
+            Checked = _config.BuildTipsEnabled,
+            CheckOnClick = true
+        };
+        tipsEnabled.CheckedChanged += (_, _) =>
+        {
+            _config.BuildTipsEnabled = tipsEnabled.Checked;
+            _config.Save();
+        };
+        menu.Items.Add(tipsEnabled);
+
+        var classMenu = new ToolStripMenuItem($"職業：{ClassLabel(_config.PlayerClass)}");
+        AddChoiceItems(classMenu, new (string Label, string Value)[]
+        {
+            ("死靈法師", "Necromancer"), ("野蠻人", "Barbarian"), ("聖教軍", "Crusader"),
+            ("狩魔獵人", "DemonHunter"), ("武僧", "Monk"), ("秘術師", "Wizard"),
+            ("血騎士", "BloodKnight"), ("霧刃", "Tempest"), ("德魯伊", "Druid")
+        }, _config.PlayerClass, value => _config.PlayerClass = value);
+        menu.Items.Add(classMenu);
+
+        var styleMenu = new ToolStripMenuItem($"偏好：{StyleLabel(_config.BuildPreference)}");
+        AddChoiceItems(styleMenu, new (string Label, string Value)[]
+        {
+            ("輕鬆推進", "EasyPvE"), ("召喚流", "Summons"),
+            ("傷害優先", "Damage"), ("生存優先", "Survival")
+        }, _config.BuildPreference, value => _config.BuildPreference = value);
+        menu.Items.Add(styleMenu);
+
+        menu.Show(_settingsButton, new Point(0, _settingsButton.Height));
+    }
+
+    private void AddChoiceItems(
+        ToolStripMenuItem parent,
+        IEnumerable<(string Label, string Value)> choices,
+        string selected,
+        Action<string> apply)
+    {
+        foreach (var choice in choices)
+        {
+            var item = new ToolStripMenuItem(choice.Label) { Checked = choice.Value == selected };
+            item.Click += (_, _) =>
+            {
+                apply(choice.Value);
+                _config.Save();
+                SetStatus($"設定已更新：{choice.Label}");
+            };
+            parent.DropDownItems.Add(item);
+        }
     }
 
     private void PickRegion(CaptureRegionKind kind)
@@ -516,6 +668,8 @@ internal sealed class CoachForm : Form
         }
 
         var wasRunning = _running;
+        _settingsOpen = true;
+        _runVersion++;
         _scanTimer.Stop();
         Hide();
         try
@@ -560,6 +714,7 @@ internal sealed class CoachForm : Form
         }
         finally
         {
+            _settingsOpen = false;
             Show();
             RestoreGameFocus();
             if (wasRunning)
@@ -578,94 +733,52 @@ internal sealed class CoachForm : Form
 
     private void OpenVoiceSettings()
     {
+        _settingsOpen = true;
         using var settings = new VoiceSettingsForm(_config, _speechService);
-        settings.ShowDialog(this);
-    }
-
-    private void ShowInteractionMenu()
-    {
-        var menu = new ContextMenuStrip
-        {
-            ShowImageMargin = false,
-            BackColor = Color.FromArgb(30, 33, 42),
-            ForeColor = Color.WhiteSmoke,
-            Font = Font
-        };
-        menu.Items.Add("告訴我下一步", null, (_, _) => RunInteraction(AskNextStep));
-        menu.Items.Add("出一題英文挑戰", null, (_, _) => RunInteraction(StartChallenge));
-        menu.Items.Add("自由提問／回答", null, (_, _) => OpenAskCoach());
-        menu.Show(_interactButton, new Point(0, _interactButton.Height));
-    }
-
-    private void RunInteraction(Action action)
-    {
-        action();
-        BeginInvoke(RestoreGameFocus);
-    }
-
-    private void AskNextStep()
-    {
-        if (string.IsNullOrWhiteSpace(_currentQuest))
-        {
-            SetStatus(_config.QuestRegionConfigured
-                ? "目前還沒讀到任務文字；請讓任務視窗保持顯示，或先測試辨識。"
-                : "請先按「範圍 → 設定任務目標區」。");
-            return;
-        }
-        _interactionInProgress = true;
-        StartCoachRequest(
-            $"QUEST · {_currentQuest}",
-            "教練正在重新整理下一步……",
-            token => _coachService.GuideQuestAsync(_currentQuest, _currentDialogue, _config, token),
-            _ => _interactionInProgress = false);
-    }
-
-    private void StartChallenge()
-    {
-        if (string.IsNullOrWhiteSpace(_currentQuest) && string.IsNullOrWhiteSpace(_currentDialogue))
-        {
-            SetStatus("先讓教練讀到一段任務或對話，再開始英文挑戰。");
-            return;
-        }
-        AskQuickQuestion("請用目前畫面上的英文考我一題簡短的 A/B/C 選擇題。不要先公布答案。");
-    }
-
-    private void OpenAskCoach()
-    {
-        using var ask = new AskCoachForm(
-            !string.IsNullOrWhiteSpace(_currentQuest),
-            !string.IsNullOrWhiteSpace(_currentDialogue));
-        if (ask.ShowDialog(this) == DialogResult.OK)
-            AskQuickQuestion(ask.Question);
+        try { settings.ShowDialog(this); }
+        finally { _settingsOpen = false; }
         RestoreGameFocus();
     }
 
-    private void AskQuickQuestion(string question)
+    private void SetOverlayOpacity(double value)
     {
-        var conversationSnapshot = _coachConversation.ToArray();
-        _interactionInProgress = true;
-        StartCoachRequest(
-            $"YOU · {question}",
-            "教練正在根據目前畫面回答……",
-            token => _coachService.AskAsync(
-                question,
-                _currentQuest,
-                _currentDialogue,
-                conversationSnapshot,
-                _config,
-                token),
-            reply =>
-            {
-                _interactionInProgress = false;
-                _coachConversation.Add($"PLAYER: {question}");
-                _coachConversation.Add($"COACH: {reply.SimpleEnglish} / {reply.TraditionalChinese}");
-                while (_coachConversation.Count > 8)
-                    _coachConversation.RemoveAt(0);
-            });
+        Opacity = value;
+        _config.WindowOpacity = value;
+        _config.Save();
     }
+
+    private void MoveToSafePosition()
+    {
+        _gameWindow ??= CaptureService.FindDiabloWindow();
+        if (_gameWindow is not null && CaptureService.TryRefresh(_gameWindow, out var refreshed))
+        {
+            _gameWindow = refreshed;
+            PositionOverGameWindow(refreshed.ClientBounds);
+            _config.WindowLeft = Left;
+            _config.WindowTop = Top;
+            _config.Save();
+        }
+        RestoreGameFocus();
+    }
+
+    private static string ClassLabel(string value) => value switch
+    {
+        "Necromancer" => "死靈法師", "Barbarian" => "野蠻人", "Crusader" => "聖教軍",
+        "DemonHunter" => "狩魔獵人", "Monk" => "武僧", "Wizard" => "秘術師",
+        "BloodKnight" => "血騎士", "Tempest" => "霧刃", "Druid" => "德魯伊",
+        _ => value
+    };
+
+    private static string StyleLabel(string value) => value switch
+    {
+        "Summons" => "召喚流", "Damage" => "傷害優先", "Survival" => "生存優先",
+        _ => "輕鬆推進"
+    };
 
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
+        _running = false;
+        _runVersion++;
         _config.WindowLeft = Left;
         _config.WindowTop = Top;
         _config.Save();
@@ -674,33 +787,62 @@ internal sealed class CoachForm : Form
         _translationCts?.Cancel();
         _speechService.Dispose();
         _loadMonitor.Dispose();
+        _settingsMenu?.Dispose();
         _translationCts?.Dispose();
         _lifetimeCts.Dispose();
     }
 
-    private void SetStatus(string text) => _statusLabel.Text = $"OCR：{_ocrService.RecognizerLanguage} · {text}";
-
-    private void CycleOpacity()
+    private void SetStatus(string text)
     {
-        Opacity = Opacity < 0.73 ? 0.80 : Opacity < 0.86 ? 0.92 : 0.65;
-        _config.WindowOpacity = Opacity;
-        _opacityButton.Text = $"{Opacity:P0}";
-        _config.Save();
+        if (IsDisposed || Disposing)
+            return;
+        if (InvokeRequired)
+        {
+            if (IsHandleCreated)
+            {
+                try { BeginInvoke(() => SetStatus(text)); }
+                catch (InvalidOperationException) { /* Window closed between check and dispatch. */ }
+            }
+            return;
+        }
+        _statusLabel.Text = $"OCR：{_ocrService.RecognizerLanguage} · {text}";
     }
 
-    private void ToggleCompactMode()
+    internal bool VerifyUiAndLoadDemo()
     {
-        var workingArea = Screen.FromRectangle(Bounds).WorkingArea;
-        var wasDockedNearBottom = Bottom >= workingArea.Bottom - 45;
-        var previousBottom = Bottom;
-        _config.CompactMode = !_config.CompactMode;
-        _contentPanel.Visible = !_config.CompactMode;
-        Height = _config.CompactMode ? CompactHeight : ExpandedHeight;
-        if (wasDockedNearBottom)
-            Top = previousBottom - Height;
-        _collapseButton.Text = _config.CompactMode ? "▾" : "▴";
-        _config.Save();
-        ApplyRoundedCorners();
+        if (!_previewMode)
+            throw new InvalidOperationException("UI regression is preview-only.");
+        static IEnumerable<Control> Descendants(Control control) =>
+            control.Controls.Cast<Control>().SelectMany(child => new[] { child }.Concat(Descendants(child)));
+        var buttons = Descendants(this).OfType<Button>().Select(button => button.Text).ToArray();
+        if (!buttons.SequenceEqual(new[] { "開啟", "設定", "×" }))
+            return false;
+        for (var i = 0; i < 8; i++)
+        {
+            ShowSettingsMenu();
+            Application.DoEvents();
+            _settingsMenu!.Close();
+            Application.DoEvents();
+            if (_settingsOpen || _settingsMenu.IsDisposed)
+                return false;
+        }
+        ToggleRunning();
+        var pending = new TaskCompletionSource<CoachReply>();
+        StartCoachRequest("test", "test", _ => pending.Task);
+        var request = _translationCts!;
+        ToggleRunning();
+        if (_running || _scanTimer.Enabled || !request.IsCancellationRequested || _retryRequest is not null)
+            return false;
+        pending.SetResult(new CoachReply("late", "late", "late", Array.Empty<KeywordCard>(), true));
+        Application.DoEvents();
+        if (_originalLabel.Text == "late")
+            return false;
+        _originalLabel.Text = "QUEST · Head to Guard's Watch";
+        _simpleLabel.Text = "Go to Guard's Watch.";
+        _chineseLabel.Text = "現在要做：前往 Guard's Watch。\n英文小知識：head to＝前往某地。";
+        _keywordsLabel.Text = "一般配裝建議 · 非背包分析\nBuild = 技能與裝備的搭配\n先選一個常用核心技能，再挑強化該技能的效果。";
+        SetStatus("預覽 · 任務優先，空閒時補充英文／流派");
+        return true;
     }
 
     private void DragOverlay(object? sender, MouseEventArgs eventArgs)
@@ -725,7 +867,7 @@ internal sealed class CoachForm : Form
 
     private void RestoreGameFocus()
     {
-        if (_gameWindow is not null && _gameWindow.Handle != nint.Zero)
+        if (!IsDisposed && !Disposing && _gameWindow is not null && _gameWindow.Handle != nint.Zero)
             NativeMethods.SetForegroundWindow(_gameWindow.Handle);
     }
 
@@ -816,7 +958,7 @@ internal sealed class CoachForm : Form
         button.Text = text;
         button.AutoSize = false;
         button.Height = 25;
-        button.Width = text is "範圍" or "測試" or "聲音" or "互動"
+        button.Width = text is "開啟" or "關閉" or "設定"
             ? 48
             : text.Length <= 2 ? 34 : text.Length <= 4 ? 46 : 55;
         button.FlatStyle = FlatStyle.Flat;

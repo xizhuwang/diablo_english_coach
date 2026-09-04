@@ -19,21 +19,22 @@ internal sealed class AdaptiveLoadMonitor : IDisposable
     private ulong _previousTotal;
     private bool _hasCpuSample;
 
-    public LoadSnapshot Sample(bool coachBusy, bool explicitInteraction)
+    public LoadSnapshot Sample(bool coachBusy)
     {
         var actionKeyIdleMs = _keyboard.ActionKeyIdleMilliseconds;
         var cpuPercent = ReadCpuPercent();
         return new LoadSnapshot(
             cpuPercent,
             actionKeyIdleMs,
-            ShouldDefer(cpuPercent, actionKeyIdleMs, coachBusy, explicitInteraction));
+            ShouldDefer(cpuPercent, actionKeyIdleMs, coachBusy));
     }
 
-    internal static bool ShouldDefer(double cpuPercent, int actionKeyIdleMs, bool coachBusy, bool explicitInteraction) =>
-        !explicitInteraction &&
-        (coachBusy || actionKeyIdleMs < ActiveKeyThresholdMs || cpuPercent >= HighCpuThresholdPercent);
+    internal static bool ShouldDefer(double cpuPercent, int actionKeyIdleMs, bool coachBusy) =>
+        coachBusy || actionKeyIdleMs < ActiveKeyThresholdMs || cpuPercent >= HighCpuThresholdPercent;
 
     public void Dispose() => _keyboard.Dispose();
+
+    public void SetEnabled(bool enabled) => _keyboard.SetEnabled(enabled);
 
     private double ReadCpuPercent()
     {
@@ -56,7 +57,7 @@ internal sealed class AdaptiveLoadMonitor : IDisposable
         _previousTotal = totalValue;
         if (totalDelta == 0)
             return 0;
-        return Math.Clamp((totalDelta - idleDelta) * 100d / totalDelta, 0, 100);
+        return Math.Clamp(((double)totalDelta - idleDelta) * 100d / totalDelta, 0, 100);
     }
 
     private static ulong ToUInt64(NativeFileTime value) => ((ulong)value.High << 32) | value.Low;
@@ -86,8 +87,10 @@ internal sealed class KeyboardActivityMonitor : IDisposable
     {
         // Polling avoids global keyboard hooks. No key code or text is retained;
         // only the time of the latest non-Space keyboard action is stored.
-        _timer = new System.Threading.Timer(PollKeyboard, null, 0, 60);
+        _timer = new System.Threading.Timer(PollKeyboard, null, Timeout.Infinite, Timeout.Infinite);
     }
+
+    public void SetEnabled(bool enabled) => _timer.Change(enabled ? 0 : Timeout.Infinite, enabled ? 60 : Timeout.Infinite);
 
     public int ActionKeyIdleMilliseconds
     {

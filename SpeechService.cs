@@ -85,6 +85,11 @@ internal sealed class SpeechService : IDisposable
 
             lock (_playerLock)
             {
+                if (_disposed || generation != Volatile.Read(ref _generation))
+                {
+                    TryDelete(path);
+                    return;
+                }
                 ClosePlayer();
                 DeleteCurrentAudio();
                 _currentAudioPath = path;
@@ -103,13 +108,17 @@ internal sealed class SpeechService : IDisposable
             if (_disposed || generation != Volatile.Read(ref _generation))
                 return;
             Notify($"自然語音連線失敗，已改用離線聲音：{exception.Message}");
-            RunOnUi(() => SpeakLocal(text, chinese));
+            RunOnUi(() =>
+            {
+                if (!_disposed && generation == Volatile.Read(ref _generation))
+                    SpeakLocal(text, chinese);
+            });
         }
     }
 
     private void SpeakLocal(string text, bool chinese)
     {
-        if (_speaker is null)
+        if (_disposed || _speaker is null)
             return;
 
         try

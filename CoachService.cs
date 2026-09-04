@@ -7,18 +7,6 @@ namespace DiabloEnglishCoach;
 internal sealed class CoachService
 {
     private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(45) };
-    private static readonly (string Phrase, string Correct, string WrongB, string WrongC)[] ChallengeCards =
-    {
-        ("head to", "前往", "等待", "離開"),
-        ("talk to", "與……交談", "攻擊", "跟隨"),
-        ("defeat", "擊敗", "營救", "裝備"),
-        ("follow", "跟隨", "尋找", "返回"),
-        ("find", "尋找／找到", "丟棄", "升級"),
-        ("enter", "進入", "收集", "防守"),
-        ("cemetery", "墓園", "市場", "港口"),
-        ("undead", "不死族", "商人", "隊友")
-    };
-
     public Task<CoachReply> ExplainAsync(string original, CoachConfig config, CancellationToken cancellationToken) =>
         RequestAsync(
             original,
@@ -27,7 +15,12 @@ internal sealed class CoachService
             config,
             cancellationToken);
 
-    public async Task<CoachReply> GuideQuestAsync(string quest, string dialogue, CoachConfig config, CancellationToken cancellationToken)
+    public async Task<CoachReply> GuideQuestAsync(
+        string quest,
+        string dialogue,
+        CoachConfig config,
+        CancellationToken cancellationToken,
+        bool includeBuildTip = false)
     {
         var visibleContext = $"VISIBLE QUEST:\n{quest}\n\nVISIBLE DIALOGUE:\n{dialogue}";
         var reply = await RequestAsync(
@@ -36,28 +29,8 @@ internal sealed class CoachService
             "Act as a friendly game-and-English coach. Restate ONLY the action explicitly written in the visible quest; do not add a second action. Start the Traditional Chinese field with 現在要做：, then add one short 英文小知識： about a quest verb or phrase. If useful, you may say that selecting the visible quest entry may show a marker, but label this as 操作建議. Never suggest talking, fighting, collecting, or interacting unless that exact action appears in the visible text. Do not invent a route, target, NPC, reward, or later event.",
             config,
             cancellationToken);
-        return GroundCommonQuestInstruction(quest, reply);
-    }
-
-    public async Task<CoachReply> AskAsync(
-        string question,
-        string quest,
-        string dialogue,
-        IReadOnlyList<string> conversation,
-        CoachConfig config,
-        CancellationToken cancellationToken)
-    {
-        var history = conversation.Count == 0 ? "(none)" : string.Join("\n", conversation.TakeLast(6));
-        var visibleContext = $"VISIBLE QUEST:\n{quest}\n\nVISIBLE DIALOGUE:\n{dialogue}\n\nRECENT COACH CHAT:\n{history}\n\nPLAYER QUESTION:\n{question}";
-        var reply = await RequestAsync(
-            $"YOU · {question}",
-            visibleContext,
-            "Answer the player conversationally and briefly. You may teach English vocabulary, grammar, or common usage. For gameplay questions, use only the visible quest and dialogue. If asked for a challenge, make one playful A/B/C English question using a word visible on screen and invite the player to answer in the chat. If the player is answering a previous challenge, say whether it is correct and explain why. Never reveal unseen story or quest information.",
-            config,
-            cancellationToken);
-        if (IsChallengeRequest(question))
-            return GroundChallenge(quest + "\n" + dialogue, reply);
-        return GroundChallengeAnswer(question, quest + "\n" + dialogue, conversation, reply);
+        var grounded = GroundCommonQuestInstruction(quest, reply);
+        return includeBuildTip ? BuildAdvisor.AppendTip(grounded, config, quest) : grounded;
     }
 
     private async Task<CoachReply> RequestAsync(
@@ -82,8 +55,8 @@ internal sealed class CoachService
                     {
                         role = "system",
                         content = """
-You are a friendly, interactive, spoiler-safe English and gameplay coach shown over Diablo Immortal.
-You may use ONLY the visible OCR text and recent coach chat supplied by the user. You may explain
+You are a friendly, spoiler-safe English and gameplay coach shown over Diablo Immortal.
+You may use ONLY the visible OCR text supplied by the user. You may explain
 general English, but never use franchise knowledge, character biographies, wikis, walkthroughs,
 later quests, or predictions. Never reveal future identities, motives, bosses, locations, rewards,
 or plot events. If the visible text does not establish a gameplay fact, say: 目前畫面沒有說明.
@@ -105,6 +78,7 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
                     temperature = 0.1,
                     num_ctx = 2048,
                     num_predict = 160,
+                    num_thread = Math.Clamp(config.InferenceThreads, 1, 4),
                     // Keep the MX330's 2 GB VRAM free for Diablo Immortal. The
                     // 2B coach model fits comfortably in system RAM on this PC.
                     num_gpu = config.ForceCpuInference ? 0 : -1
@@ -204,7 +178,7 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
             .Select(pair => new KeywordCard(pair.Key, pair.Value))
             .ToArray();
 
-        return new CoachReply(displayOriginal, displayOriginal, "（啟動本機模型後會在這裡顯示互動式繁中教學。）", keywords, false, notice);
+        return new CoachReply(displayOriginal, displayOriginal, "（啟動本機模型後會在這裡顯示繁中遊戲與英文教學。）", keywords, false, notice);
     }
 
     private static CoachReply GroundCommonQuestInstruction(string quest, CoachReply reply)
@@ -251,65 +225,6 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
             ? reply.TraditionalChinese
             : $"現在要做：{reply.TraditionalChinese}";
         return reply with { TraditionalChinese = chinese };
-    }
-
-    private static bool IsChallengeRequest(string question) =>
-        question.Contains("挑戰", StringComparison.OrdinalIgnoreCase) ||
-        question.Contains("考我", StringComparison.OrdinalIgnoreCase) ||
-        question.Contains("quiz", StringComparison.OrdinalIgnoreCase) ||
-        question.Contains("A/B/C", StringComparison.OrdinalIgnoreCase);
-
-    private static CoachReply GroundChallenge(string visibleText, CoachReply reply)
-    {
-        var card = ChallengeCards.FirstOrDefault(item => visibleText.Contains(item.Phrase, StringComparison.OrdinalIgnoreCase));
-        if (string.IsNullOrEmpty(card.Phrase))
-        {
-            var visibleWord = Regex.Match(visibleText, @"\b[A-Za-z]{4,}\b").Value;
-            if (visibleWord.Length == 0)
-                return reply;
-            return reply with
-            {
-                SimpleEnglish = $"Which word is visible on screen?\nA) {visibleWord}    B) banana    C) airplane\nReply A, B, or C.",
-                TraditionalChinese = "小挑戰：哪個英文單字真的在目前畫面上？請回答 A、B 或 C，我不先公布答案。",
-                Keywords = Array.Empty<KeywordCard>()
-            };
-        }
-
-        return reply with
-        {
-            SimpleEnglish = $"What does “{card.Phrase}” mean?\nA) {card.Correct}    B) {card.WrongB}    C) {card.WrongC}\nReply A, B, or C.",
-            TraditionalChinese = $"小挑戰：畫面上的 {card.Phrase} 是什麼意思？請回答 A、B 或 C，我不先公布答案。",
-            Keywords = Array.Empty<KeywordCard>()
-        };
-    }
-
-    private static CoachReply GroundChallengeAnswer(
-        string question,
-        string visibleText,
-        IReadOnlyList<string> conversation,
-        CoachReply reply)
-    {
-        var choice = question.Trim().ToUpperInvariant();
-        var hasActiveChallenge = conversation.Any(line =>
-            line.Contains("Reply A, B, or C", StringComparison.OrdinalIgnoreCase));
-        if (!hasActiveChallenge || choice is not ("A" or "B" or "C"))
-            return reply;
-
-        var card = ChallengeCards.FirstOrDefault(item => visibleText.Contains(item.Phrase, StringComparison.OrdinalIgnoreCase));
-        if (string.IsNullOrEmpty(card.Phrase))
-            return reply;
-
-        var correct = choice == "A";
-        return reply with
-        {
-            SimpleEnglish = correct
-                ? $"Correct! “{card.Phrase}” means “{card.Correct}”."
-                : $"Not quite. The correct answer is A: “{card.Phrase}” means “{card.Correct}”.",
-            TraditionalChinese = correct
-                ? $"答對了！{card.Phrase} 就是「{card.Correct}」。"
-                : $"差一點，正確答案是 A；{card.Phrase} 的意思是「{card.Correct}」。",
-            Keywords = new[] { new KeywordCard(card.Phrase, card.Correct) }
-        };
     }
 
     private static string FriendlyOllamaError(Exception exception) => exception switch

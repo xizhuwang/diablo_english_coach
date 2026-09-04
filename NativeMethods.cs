@@ -55,6 +55,9 @@ internal static class NativeMethods
     internal static extern bool SetForegroundWindow(nint windowHandle);
 
     [DllImport("user32.dll")]
+    internal static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
     internal static extern bool ReleaseCapture();
 
     [DllImport("user32.dll")]

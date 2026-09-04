@@ -21,6 +21,7 @@ internal sealed class CoachConfig
     public bool SpeakEnglish { get; set; }
     public bool ShowOriginal { get; set; } = true;
     public bool ForceCpuInference { get; set; } = true;
+    public int InferenceThreads { get; set; } = 2;
     public bool UseOnlineNeuralVoice { get; set; } = true;
     public string ChineseVoice { get; set; } = "zh-TW-HsiaoYuNeural";
     public string EnglishVoice { get; set; } = "en-US-AnaNeural";
@@ -32,6 +33,9 @@ internal sealed class CoachConfig
     public int WindowLeft { get; set; } = -1;
     public int WindowTop { get; set; } = -1;
     public bool CompactMode { get; set; }
+    public bool BuildTipsEnabled { get; set; } = true;
+    public string PlayerClass { get; set; } = "Necromancer";
+    public string BuildPreference { get; set; } = "EasyPvE";
 
     public static string FolderPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -69,7 +73,8 @@ internal sealed record CoachReply(
     string TraditionalChinese,
     IReadOnlyList<KeywordCard> Keywords,
     bool UsedLocalModel,
-    string? Notice = null);
+    string? Notice = null,
+    string? Advice = null);
 
 internal sealed record WindowInfo(nint Handle, string Title, Rectangle ClientBounds)
 {

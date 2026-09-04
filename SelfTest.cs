@@ -15,48 +15,18 @@ internal static class SelfTest
                 "The Risen Dead. Head to Ashwold Cemetery.",
                 string.Empty,
                 new CoachConfig(),
-                CancellationToken.None);
+                CancellationToken.None,
+                includeBuildTip: true);
             checks["used_local_model"] = reply.UsedLocalModel;
             checks["simple_english"] = reply.SimpleEnglish;
             checks["traditional_chinese"] = reply.TraditionalChinese;
+            checks["advice"] = reply.Advice ?? string.Empty;
             checks["keywords"] = reply.Keywords.Select(item => new { item.Word, item.Meaning }).ToArray();
 
-            var challenge = await new CoachService().AskAsync(
-                "請用目前畫面的英文考我一題 A/B/C，不要公布答案。",
-                "The Risen Dead. Head to Ashwold Cemetery.",
-                string.Empty,
-                Array.Empty<string>(),
-                new CoachConfig(),
-                CancellationToken.None);
-            checks["challenge_used_local_model"] = challenge.UsedLocalModel;
-            checks["challenge_simple_english"] = challenge.SimpleEnglish;
-            checks["challenge_traditional_chinese"] = challenge.TraditionalChinese;
-
-            var answer = await new CoachService().AskAsync(
-                "A",
-                "The Risen Dead. Head to Ashwold Cemetery.",
-                string.Empty,
-                new[]
-                {
-                    "PLAYER: 請考我一題",
-                    $"COACH: {challenge.SimpleEnglish} / {challenge.TraditionalChinese}"
-                },
-                new CoachConfig(),
-                CancellationToken.None);
-            checks["answer_used_local_model"] = answer.UsedLocalModel;
-            checks["answer_simple_english"] = answer.SimpleEnglish;
-            checks["answer_traditional_chinese"] = answer.TraditionalChinese;
-
-            var challengeText = challenge.SimpleEnglish + challenge.TraditionalChinese;
-            var answerText = answer.SimpleEnglish + answer.TraditionalChinese;
             var passed = reply.UsedLocalModel &&
                          reply.TraditionalChinese.StartsWith("現在要做：", StringComparison.Ordinal) &&
                          reply.SimpleEnglish.Length > 0 &&
-                         challenge.UsedLocalModel &&
-                         challengeText.Contains('A') && challengeText.Contains('B') && challengeText.Contains('C') &&
-                         answer.UsedLocalModel &&
-                         (answerText.Contains("正確", StringComparison.OrdinalIgnoreCase) ||
-                          answerText.Contains("correct", StringComparison.OrdinalIgnoreCase));
+                         !string.IsNullOrWhiteSpace(reply.Advice);
             checks["passed"] = passed;
             Write(outputPath, checks);
             return passed;
@@ -115,6 +85,8 @@ internal static class SelfTest
             var form = new CoachForm(previewMode: true);
             form.Show();
             Application.DoEvents();
+            if (!form.VerifyUiAndLoadDemo())
+                return false;
             using var bitmap = new Bitmap(form.Width, form.Height, PixelFormat.Format32bppArgb);
             form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? Environment.CurrentDirectory);
@@ -184,12 +156,11 @@ internal static class SelfTest
             checks["unknown_keyword_filtered"] = parsed.Keywords.Count == 1 && parsed.Keywords[0].Word == "defeat";
 
             using var loadMonitor = new AdaptiveLoadMonitor();
-            var sampledLoad = loadMonitor.Sample(coachBusy: false, explicitInteraction: false);
+            var sampledLoad = loadMonitor.Sample(coachBusy: false);
             checks["adaptive_load_sample_valid"] = sampledLoad.CpuPercent is >= 0 and <= 100 && sampledLoad.ActionKeyIdleMs >= 0;
-            checks["adaptive_load_defers_input"] = AdaptiveLoadMonitor.ShouldDefer(20, 500, false, false);
-            checks["adaptive_load_defers_high_cpu"] = AdaptiveLoadMonitor.ShouldDefer(85, 5000, false, false);
-            checks["adaptive_load_resumes_when_idle"] = !AdaptiveLoadMonitor.ShouldDefer(30, 5000, false, false);
-            checks["explicit_interaction_starts_immediately"] = !AdaptiveLoadMonitor.ShouldDefer(90, 100, true, true);
+            checks["adaptive_load_defers_input"] = AdaptiveLoadMonitor.ShouldDefer(20, 500, false);
+            checks["adaptive_load_defers_high_cpu"] = AdaptiveLoadMonitor.ShouldDefer(85, 5000, false);
+            checks["adaptive_load_resumes_when_idle"] = !AdaptiveLoadMonitor.ShouldDefer(30, 5000, false);
             checks["space_is_dialogue_not_action"] = !KeyboardActivityMonitor.IsActionKey(KeyboardActivityMonitor.SpaceVirtualKey);
             checks["wasd_is_action"] = KeyboardActivityMonitor.IsActionKey((int)Keys.W) &&
                                         KeyboardActivityMonitor.IsActionKey((int)Keys.A) &&
@@ -200,6 +171,42 @@ internal static class SelfTest
                 new Rectangle(346, 10, 1229, 158), screen);
             checks["new_bottom_position_avoids_enemy_hud"] = !CoachForm.OverlapsEnemyHud(
                 new Rectangle(346, 872, 1229, 158), screen);
+
+            var advised = BuildAdvisor.AppendTip(parsed, new CoachConfig(), "Head to Ashwold Cemetery.");
+            checks["advice_preserves_quest_translation"] = advised.TraditionalChinese == parsed.TraditionalChinese &&
+                                                          !string.IsNullOrWhiteSpace(advised.Advice);
+            checks["advice_can_be_disabled"] = BuildAdvisor.AppendTip(parsed,
+                new CoachConfig { BuildTipsEnabled = false }, "quest") == parsed;
+            checks["class_preference_changes_advice"] =
+                !BuildAdvisor.GetTips("Necromancer", "Summons").SequenceEqual(BuildAdvisor.GetTips("Necromancer", "Survival"));
+
+            var planner = new IdleLessonPlanner();
+            var lessonConfig = new CoachConfig();
+            planner.Reset(0);
+            checks["idle_requires_quiet_period"] = planner.TryNext(45_000, true, lessonConfig) is null;
+            checks["idle_teaches_after_quiet_period"] = planner.TryNext(55_000, true, lessonConfig) is not null;
+            checks["idle_no_burst"] = planner.TryNext(55_001, true, lessonConfig) is null;
+            checks["busy_blocks_overdue_lesson"] = planner.TryNext(150_000, false, lessonConfig) is null;
+            checks["busy_resets_quiet_period"] = planner.TryNext(151_000, true, lessonConfig) is null;
+            checks["idle_recovers_after_combat"] = planner.TryNext(161_000, true, lessonConfig) is not null;
+            planner.ObserveLesson(162_000, new[] { new KeywordCard("head to", "前往") });
+            checks["new_quest_delays_idle_lesson"] = planner.TryNext(170_000, true, lessonConfig) is null;
+            var lessons = new List<IdleLesson>();
+            for (var now = 207_000L; now < 207_000L + 18 * 45_000L; now += 45_000L)
+            {
+                if (planner.TryNext(now, true, lessonConfig) is { } lesson)
+                    lessons.Add(lesson);
+            }
+            checks["idle_repeats_seen_words"] = lessons.Any(lesson => lesson.English == "head to");
+            checks["idle_includes_build_preparation"] = lessons.Any(lesson => lesson.Title.Contains("配裝"));
+            checks["idle_varied_lessons"] = lessons.Select(lesson => lesson.English).Distinct().Count() >= 7;
+            var englishOnly = new IdleLessonPlanner();
+            var noBuild = new CoachConfig { BuildTipsEnabled = false };
+            englishOnly.Reset(0);
+            englishOnly.TryNext(0, true, noBuild);
+            checks["idle_honors_disabled_build_tips"] = Enumerable.Range(1, 9)
+                .Select(i => englishOnly.TryNext(i * 45_000L, true, noBuild))
+                .All(lesson => lesson is not null && !lesson.Title.StartsWith("一般配裝"));
 
             var passed = checks.Values.OfType<bool>().All(value => value);
             checks["passed"] = passed;
