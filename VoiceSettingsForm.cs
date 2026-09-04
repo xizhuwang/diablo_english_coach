@@ -144,7 +144,6 @@ internal sealed class VoiceSettingsForm : Form
 
     private void Apply()
     {
-        _speech.Stop();
         _config.UseOnlineNeuralVoice = _online.Checked;
         _config.ChineseVoice = (_chineseVoice.SelectedItem as VoiceChoice)?.Id ?? "zh-TW-HsiaoYuNeural";
         _config.EnglishVoice = (_englishVoice.SelectedItem as VoiceChoice)?.Id ?? "en-US-AnaNeural";

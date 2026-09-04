@@ -1,2 +1,9 @@
 @echo off
-start "" "%~dp0publish\DiabloEnglishCoach.exe"
+if exist "%~dp0publish-readable\DiabloEnglishCoach.exe" (
+    start "" "%~dp0publish-readable\DiabloEnglishCoach.exe"
+) else if exist "%~dp0app\DiabloEnglishCoach.exe" (
+    start "" "%~dp0app\DiabloEnglishCoach.exe"
+) else (
+    echo New coach executable not found. Build or download the latest package first.
+    pause
+)

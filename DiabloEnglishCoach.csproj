@@ -16,5 +16,10 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="EdgeTTS.DotNet" Version="0.4.0" />
+    <PackageReference Include="Vosk" Version="0.3.38" />
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="speech-model\**\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
   </ItemGroup>
 </Project>

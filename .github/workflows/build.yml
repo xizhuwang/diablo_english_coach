@@ -14,6 +14,10 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Download verified offline speaking model
+        shell: pwsh
+        run: ./安裝口說模型.ps1
+
       - name: Publish self-contained app
         shell: pwsh
         run: dotnet publish -c Release -r win-x64 --self-contained true -o dist/app
@@ -22,7 +26,9 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item README.md dist/README.md
+          Copy-Item 啟動英文教練.cmd dist/啟動英文教練.cmd
           Copy-Item 安裝本機模型.cmd dist/安裝本機模型.cmd
+          Copy-Item 安裝口說模型.ps1 dist/安裝口說模型.ps1
           New-Item -ItemType Directory -Force dist/scripts | Out-Null
           Copy-Item scripts/setup-model.ps1 dist/scripts/setup-model.ps1
 

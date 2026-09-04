@@ -4,10 +4,13 @@ namespace DiabloEnglishCoach;
 
 internal sealed class CoachConfig
 {
-    public double RegionX { get; set; } = 0.12;
-    public double RegionY { get; set; } = 0.58;
-    public double RegionWidth { get; set; } = 0.76;
-    public double RegionHeight { get; set; } = 0.30;
+    public double RegionX { get; set; } = 0.27;
+    public double RegionY { get; set; } = 0.64;
+    public double RegionWidth { get; set; } = 0.46;
+    public double RegionHeight { get; set; } = 0.24;
+    public bool OnlineTranslationEnabled { get; set; }
+    public string AzureTranslatorRegion { get; set; } = "";
+    public int OverlayLayoutVersion { get; set; }
     public double QuestRegionX { get; set; } = 0.005;
     public double QuestRegionY { get; set; } = 0.20;
     public double QuestRegionWidth { get; set; } = 0.22;
@@ -32,8 +35,12 @@ internal sealed class CoachConfig
     public double WindowOpacity { get; set; } = 0.80;
     public int WindowLeft { get; set; } = -1;
     public int WindowTop { get; set; } = -1;
+    public int WindowBottom { get; set; } = -1;
+    public int TranslationWidth { get; set; }
     public bool CompactMode { get; set; }
     public bool BuildTipsEnabled { get; set; } = true;
+    // Opt-in only: upgrading or starting the coach never grants microphone consent.
+    public bool AutoSpeakingEnabled { get; set; }
     public string PlayerClass { get; set; } = "Necromancer";
     public string BuildPreference { get; set; } = "EasyPvE";
 

@@ -32,9 +32,15 @@ internal sealed class AdaptiveLoadMonitor : IDisposable
     internal static bool ShouldDefer(double cpuPercent, int actionKeyIdleMs, bool coachBusy) =>
         coachBusy || actionKeyIdleMs < ActiveKeyThresholdMs || cpuPercent >= HighCpuThresholdPercent;
 
+    // num_thread is selected per request, not changed by canceling a running answer.
+    internal static int InferenceBudget(LoadSnapshot load, int processors) =>
+        load.ActionKeyIdleMs < ActiveKeyThresholdMs || load.CpuPercent >= 55
+            ? 1 : Math.Clamp(processors / 2, 1, 4);
+
     public void Dispose() => _keyboard.Dispose();
 
     public void SetEnabled(bool enabled) => _keyboard.SetEnabled(enabled);
+    public int DialogueKeyIdleMs => _keyboard.DialogueKeyIdleMilliseconds;
 
     private double ReadCpuPercent()
     {
@@ -82,6 +88,10 @@ internal sealed class KeyboardActivityMonitor : IDisposable
     private const int LastKeyboardVirtualKey = 0xFE;
     private readonly System.Threading.Timer _timer;
     private long _lastActionKeyTick = Environment.TickCount64 - AdaptiveLoadMonitor.ActiveKeyThresholdMs;
+    private long _lastDialogueKeyTick = Environment.TickCount64;
+
+    public int DialogueKeyIdleMilliseconds => (int)Math.Clamp(
+        Environment.TickCount64 - Interlocked.Read(ref _lastDialogueKeyTick), 0, int.MaxValue);
 
     public KeyboardActivityMonitor()
     {
@@ -109,6 +119,9 @@ internal sealed class KeyboardActivityMonitor : IDisposable
 
     private void PollKeyboard(object? state)
     {
+        // Space still allows normal dialogue teaching, but cancels microphone exercises.
+        if ((GetAsyncKeyState(SpaceVirtualKey) & 0x8000) != 0)
+            Interlocked.Exchange(ref _lastDialogueKeyTick, Environment.TickCount64);
         for (var virtualKey = FirstKeyboardVirtualKey; virtualKey <= LastKeyboardVirtualKey; virtualKey++)
         {
             if (!IsActionKey(virtualKey))

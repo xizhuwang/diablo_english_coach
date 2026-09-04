@@ -6,6 +6,22 @@ namespace DiabloEnglishCoach;
 
 internal static class SelfTest
 {
+    public static async Task<bool> TestTeachingAsync(string outputPath)
+    {
+        var results = new List<object>();
+        var passed = true;
+        foreach (var threads in new[] { 4, 1 })
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var reply = await new CoachService().ExplainAsync("Head Forward and Search for Leoric.",
+                new CoachConfig { InferenceThreads = threads }, CancellationToken.None);
+            results.Add(new { threads, milliseconds = watch.ElapsedMilliseconds, reply.UsedLocalModel,
+                reply.SimpleEnglish, reply.TraditionalChinese, narration = CoachForm.Narration(reply), reply.Notice });
+            passed &= reply.UsedLocalModel;
+        }
+        Write(outputPath, new Dictionary<string, object> { ["results"] = results, ["passed"] = passed });
+        return passed;
+    }
     public static async Task<bool> TestQuestCoachAsync(string outputPath)
     {
         var checks = new Dictionary<string, object>();
@@ -85,13 +101,12 @@ internal static class SelfTest
             var form = new CoachForm(previewMode: true);
             form.Show();
             Application.DoEvents();
-            if (!form.VerifyUiAndLoadDemo())
-                return false;
+            var passed = form.VerifyUiAndLoadDemo();
             using var bitmap = new Bitmap(form.Width, form.Height, PixelFormat.Format32bppArgb);
             form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, form.Size));
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? Environment.CurrentDirectory);
             bitmap.Save(outputPath, ImageFormat.Png);
-            return true;
+            return passed;
         }
         catch
         {
@@ -183,16 +198,24 @@ internal static class SelfTest
             var planner = new IdleLessonPlanner();
             var lessonConfig = new CoachConfig();
             planner.Reset(0);
-            checks["idle_requires_quiet_period"] = planner.TryNext(45_000, true, lessonConfig) is null;
-            checks["idle_teaches_after_quiet_period"] = planner.TryNext(55_000, true, lessonConfig) is not null;
-            checks["idle_no_burst"] = planner.TryNext(55_001, true, lessonConfig) is null;
-            checks["busy_blocks_overdue_lesson"] = planner.TryNext(150_000, false, lessonConfig) is null;
-            checks["busy_resets_quiet_period"] = planner.TryNext(151_000, true, lessonConfig) is null;
-            checks["idle_recovers_after_combat"] = planner.TryNext(161_000, true, lessonConfig) is not null;
-            planner.ObserveLesson(162_000, new[] { new KeywordCard("head to", "前往") });
-            checks["new_quest_delays_idle_lesson"] = planner.TryNext(170_000, true, lessonConfig) is null;
+            var lessonInterval = IdleLessonPlanner.IntervalMs;
+            checks["idle_requires_quiet_period"] = planner.TryNext(lessonInterval, true, lessonConfig) is null;
+            checks["idle_teaches_after_quiet_period"] = planner.TryNext(lessonInterval + IdleLessonPlanner.QuietWindowMs, true, lessonConfig) is not null;
+            checks["idle_no_burst"] = planner.TryNext(lessonInterval + IdleLessonPlanner.QuietWindowMs + 1, true, lessonConfig) is null;
+            var busyAt = lessonInterval + IdleLessonPlanner.QuietWindowMs + lessonInterval;
+            checks["busy_blocks_overdue_lesson"] = planner.TryNext(busyAt, false, lessonConfig) is null;
+            checks["busy_resets_quiet_period"] = planner.TryNext(busyAt + 1000, true, lessonConfig) is null;
+            var recoveredAt = busyAt + 1000 + IdleLessonPlanner.QuietWindowMs;
+            checks["idle_recovers_after_combat"] = planner.TryNext(recoveredAt, true, lessonConfig) is not null;
+            planner.ObserveLesson(recoveredAt + 1000, new[]
+            {
+                new KeywordCard("head to", "前往"), new KeywordCard("follow", "跟隨"),
+                new KeywordCard("defeat", "擊敗")
+            });
+            checks["new_quest_delays_idle_lesson"] = planner.TryNext(recoveredAt + 1000 + lessonInterval, true, lessonConfig) is null;
             var lessons = new List<IdleLesson>();
-            for (var now = 207_000L; now < 207_000L + 18 * 45_000L; now += 45_000L)
+            var curriculumStart = recoveredAt + 1000 + lessonInterval + IdleLessonPlanner.QuietWindowMs;
+            for (var now = curriculumStart; now < curriculumStart + 28 * lessonInterval; now += lessonInterval)
             {
                 if (planner.TryNext(now, true, lessonConfig) is { } lesson)
                     lessons.Add(lesson);
@@ -200,14 +223,20 @@ internal static class SelfTest
             checks["idle_repeats_seen_words"] = lessons.Any(lesson => lesson.English == "head to");
             checks["idle_includes_build_preparation"] = lessons.Any(lesson => lesson.Title.Contains("配裝"));
             checks["idle_varied_lessons"] = lessons.Select(lesson => lesson.English).Distinct().Count() >= 7;
+            checks["idle_avoids_short_term_repetition"] = !lessons.Zip(lessons.Skip(1))
+                .Any(pair => pair.First.English == pair.Second.English);
             var englishOnly = new IdleLessonPlanner();
             var noBuild = new CoachConfig { BuildTipsEnabled = false };
             englishOnly.Reset(0);
             englishOnly.TryNext(0, true, noBuild);
             checks["idle_honors_disabled_build_tips"] = Enumerable.Range(1, 9)
-                .Select(i => englishOnly.TryNext(i * 45_000L, true, noBuild))
+                .Select(i => englishOnly.TryNext(IdleLessonPlanner.QuietWindowMs + i * lessonInterval, true, noBuild))
                 .All(lesson => lesson is not null && !lesson.Title.StartsWith("一般配裝"));
 
+            foreach (var pair in await SpeakingSelfTest.PolicyAsync()) checks[pair.Key] = pair.Value;
+            foreach (var pair in await ParagraphSpeechSelfTest.RunAsync()) checks[pair.Key] = pair.Value;
+            foreach (var pair in await BuildGuideSelfTest.RunAsync()) checks[pair.Key] = pair.Value;
+            await FastTranslationSelfTest.AddChecksAsync(checks);
             var passed = checks.Values.OfType<bool>().All(value => value);
             checks["passed"] = passed;
             Write(outputPath, checks);

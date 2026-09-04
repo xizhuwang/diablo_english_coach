@@ -2,10 +2,14 @@ namespace DiabloEnglishCoach;
 
 internal static class BuildAdvisor
 {
-    public static CoachReply AppendTip(CoachReply reply, CoachConfig config, string visibleText)
+    public static CoachReply AppendTip(CoachReply reply, CoachConfig config, string visibleText, BuildGuideCache? guides = null)
     {
         if (!config.BuildTipsEnabled)
             return reply;
+
+        var card = guides?.Lesson(config, StableIndex(visibleText, 4));
+        if (card is not null)
+            return reply with { Advice = $"{card.Title}\n{card.English}：{card.Chinese}" };
 
         var tips = GetTips(config.PlayerClass, config.BuildPreference);
         var index = StableIndex(visibleText, tips.Length);

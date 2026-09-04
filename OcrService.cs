@@ -42,7 +42,9 @@ internal sealed partial class OcrService
         var decoder = await BitmapDecoder.CreateAsync(randomAccess).AsTask(cancellationToken);
         using var softwareBitmap = await decoder.GetSoftwareBitmapAsync().AsTask(cancellationToken);
         var result = await _engine.RecognizeAsync(softwareBitmap).AsTask(cancellationToken);
-        return Clean(result.Text);
+        // A single chat/ad line must not poison an otherwise useful subtitle.
+        return Clean(string.Join(" ", result.Lines.Select(line => line.Text)
+            .Where(line => !IsChatOrAdvertising(line))));
     }
 
     public static string Clean(string text)
@@ -58,7 +60,7 @@ internal sealed partial class OcrService
 
     public static bool LooksLikeEnglishSubtitle(string text)
     {
-        if (text.Length < 4)
+        if (text.Length < 4 || text.Length > 700 || IsChatOrAdvertising(text))
             return false;
 
         var letters = text.Count(char.IsLetter);
@@ -66,6 +68,9 @@ internal sealed partial class OcrService
         var words = WordRegex().Matches(text).Count;
         return words >= 2 && letters > 0 && latin / (double)letters >= 0.65;
     }
+
+    internal static bool IsChatOrAdvertising(string text) =>
+        Regex.IsMatch(text, @"https?\s*:|www\s*\.|\burl\s*[:>]|\b[\w-]+\.(?:com|top|net|gg)\b|\[\s*\d+\s*\]|\b(?:discount|cheap|delivery|consultation|quantity)\b|\b(?:platinum|eternal\s*orbs)\b.*[$＄]|[$＄].*\b(?:platinum|eternal\s*orbs)\b", RegexOptions.IgnoreCase);
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();

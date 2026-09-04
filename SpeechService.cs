@@ -14,12 +14,16 @@ internal sealed class SpeechService : IDisposable
     private string? _currentAudioPath;
     private int _generation;
     private bool _disposed;
+    private readonly ParagraphSpeechQueue _paragraphs;
+    public bool IsBusy => _paragraphs.IsBusy;
+    public Func<bool>? MayStartPlayback { get; set; }
 
     public event Action<string>? StatusChanged;
 
     public SpeechService(CoachConfig config, bool initializeLocalVoice = true)
     {
         _config = config;
+        _paragraphs = new ParagraphSpeechQueue(PlayParagraphAsync);
         _uiContext = SynchronizationContext.Current;
         try
         {
@@ -35,9 +39,15 @@ internal sealed class SpeechService : IDisposable
         }
     }
 
-    public void SpeakEnglish(string text) => StartSpeech(text, false);
+    public void SpeakEnglish(string text) => _ = EnqueueSpeech(text, false);
 
-    public void SpeakTraditionalChinese(string text) => StartSpeech(text, true);
+    public void SpeakTraditionalChinese(string text) => _ = EnqueueSpeech(text, true);
+
+    // True only after actual playback ends; never start a mic on a guessed delay.
+    public Task<bool> SpeakEnglishAndWaitAsync(string text) => EnqueueSpeech(text, false);
+
+    private Task<bool> EnqueueSpeech(string text, bool chinese) =>
+        _disposed || string.IsNullOrWhiteSpace(text) ? Task.FromResult(false) : _paragraphs.Enqueue(text, chinese);
 
     public void Stop()
     {
@@ -48,39 +58,53 @@ internal sealed class SpeechService : IDisposable
             ClosePlayer();
             DeleteCurrentAudio();
         }
+        _paragraphs.Clear();
     }
 
-    private void StartSpeech(string text, bool chinese)
+    private async Task<bool> PlayParagraphAsync(string text, bool chinese)
     {
         if (_disposed || string.IsNullOrWhiteSpace(text))
-            return;
+            return false;
 
-        Stop();
+        if (MayStartPlayback?.Invoke() == false)
+            return false;
+
+        // Called only by the serial paragraph queue. A new request is not a stop command.
         if (!_config.UseOnlineNeuralVoice)
         {
-            SpeakLocal(text, chinese);
-            return;
+            var localGeneration = Volatile.Read(ref _generation);
+            return SpeakLocal(text, chinese) && await WaitForLocalAsync(localGeneration);
         }
 
         var generation = Volatile.Read(ref _generation);
-        _ = SpeakNeuralAsync(text, chinese, generation);
+        return await SpeakNeuralAsync(text, chinese, generation);
     }
 
-    private async Task SpeakNeuralAsync(string text, bool chinese, int generation)
+    private async Task<bool> SpeakNeuralAsync(string text, bool chinese, int generation)
     {
         var path = Path.Combine(Path.GetTempPath(), $"diablo-coach-{Guid.NewGuid():N}.mp3");
+        Task? download = null;
         try
         {
             var voice = chinese ? _config.ChineseVoice : _config.EnglishVoice;
             var rate = FormatPercent(_config.SpeechRatePercent);
             var pitch = FormatHertz(_config.SpeechPitchHz);
             var request = new Communicate(text, voice: voice, rate: rate, pitch: pitch);
-            await request.SaveAsync(path);
+            download = request.SaveAsync(path);
+            await download.WaitAsync(TimeSpan.FromSeconds(12));
+
+            // Dialogue/cutscene may have started while neural audio downloaded.
+            // Nothing is interrupted after actual playback begins.
+            if (MayStartPlayback?.Invoke() == false)
+            {
+                TryDelete(path);
+                return false;
+            }
 
             if (_disposed || generation != Volatile.Read(ref _generation))
             {
                 TryDelete(path);
-                return;
+                return false;
             }
 
             lock (_playerLock)
@@ -88,7 +112,7 @@ internal sealed class SpeechService : IDisposable
                 if (_disposed || generation != Volatile.Read(ref _generation))
                 {
                     TryDelete(path);
-                    return;
+                    return false;
                 }
                 ClosePlayer();
                 DeleteCurrentAudio();
@@ -101,25 +125,66 @@ internal sealed class SpeechService : IDisposable
                     throw new InvalidOperationException(GetMciError(error));
             }
             Notify($"自然語音：{voice} · 語速 {rate}");
+            while (!_disposed && generation == Volatile.Read(ref _generation))
+            {
+                await Task.Delay(100);
+                lock (_playerLock)
+                {
+                    if (_disposed || generation != Volatile.Read(ref _generation)) return false;
+                    var state = new StringBuilder(32);
+                    if (mciSendString($"status {PlayerAlias} mode", state, state.Capacity, nint.Zero) != 0)
+                        return false;
+                    if (state.ToString().Equals("stopped", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ClosePlayer();
+                        DeleteCurrentAudio();
+                        return true;
+                    }
+                }
+            }
+            return false;
         }
         catch (Exception exception)
         {
+            if (download is not null && !download.IsCompleted)
+                _ = CleanLateDownloadAsync(download, path);
             TryDelete(path);
             if (_disposed || generation != Volatile.Read(ref _generation))
-                return;
+                return false;
             Notify($"自然語音連線失敗，已改用離線聲音：{exception.Message}");
-            RunOnUi(() =>
+            // Invoked from the UI, so captured await context keeps SAPI on its owner thread.
+            if (!_disposed && generation == Volatile.Read(ref _generation) && MayStartPlayback?.Invoke() != false)
             {
-                if (!_disposed && generation == Volatile.Read(ref _generation))
-                    SpeakLocal(text, chinese);
-            });
+                return SpeakLocal(text, chinese) && await WaitForLocalAsync(generation);
+            }
+            return false;
         }
     }
 
-    private void SpeakLocal(string text, bool chinese)
+    private static async Task CleanLateDownloadAsync(Task download, string path)
+    {
+        try { await download; } catch { }
+        TryDelete(path); // A late network response never starts playback.
+    }
+
+    private async Task<bool> WaitForLocalAsync(int generation)
+    {
+        try
+        {
+            do
+            {
+                await Task.Delay(100);
+                if (_disposed || generation != Volatile.Read(ref _generation)) return false;
+            } while ((int)_speaker!.Status.RunningState != 1); // SRSEDone
+            return true;
+        }
+        catch { return false; }
+    }
+
+    private bool SpeakLocal(string text, bool chinese)
     {
         if (_disposed || _speaker is null)
-            return;
+            return false;
 
         try
         {
@@ -151,10 +216,12 @@ internal sealed class SpeechService : IDisposable
             _speaker.Rate = Math.Clamp((int)Math.Round(_config.SpeechRatePercent / 10.0), -10, 10);
             _speaker.Speak(text, 3);
             Notify($"離線語音：{preferredName}");
+            return true;
         }
         catch (Exception exception)
         {
             Notify($"無法朗讀：{exception.Message}");
+            return false;
         }
     }
 

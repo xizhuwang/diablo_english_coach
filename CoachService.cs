@@ -6,14 +6,31 @@ namespace DiabloEnglishCoach;
 
 internal sealed class CoachService
 {
+    public BuildGuideCache? BuildGuides { get; set; }
+    private readonly CoachKnowledgeCache _knowledge = new();
     private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(45) };
-    public Task<CoachReply> ExplainAsync(string original, CoachConfig config, CancellationToken cancellationToken) =>
-        RequestAsync(
+    public async Task<CoachReply> ExplainAsync(string original, CoachConfig config, CancellationToken cancellationToken)
+    {
+        // Proper names are unnecessary for teaching a quest phrase and tempt tiny
+        // models into franchise recall. Keep them out of this inference task.
+        var phrase = LearningPhrase(original);
+        var teachingContext = phrase ?? original;
+        if (_knowledge.TryGet("english", teachingContext, original, out var cached))
+            return cached;
+        var reply = await RequestAsync(
             original,
-            original,
-            "Explain the current dialogue. Give an A2-B1 paraphrase, a Traditional Chinese translation, and up to three useful words or phrases. When useful, add one very short 英文小知識： note about grammar or natural usage inside the Traditional Chinese field.",
+            teachingContext,
+            "Teach the English phrase only. Give one hypothetical everyday English example (not a game instruction) and explain usage in Traditional Chinese. Do not describe a character or enemy. Return at most one keyword. Chinese under 30 characters, English under 8 words.",
             config,
             cancellationToken);
+        reply = reply with { TraditionalChinese = "英文練習（不是新任務）：" + reply.TraditionalChinese };
+        _knowledge.Store("english", teachingContext, reply);
+        return reply;
+    }
+
+    internal static string? LearningPhrase(string source) =>
+        new[] { "search for", "head to", "head forward", "talk to", "stay close", "return to", "follow", "defeat", "find", "enter", "leave" }
+            .FirstOrDefault(phrase => Regex.IsMatch(source, @"\b" + Regex.Escape(phrase) + @"\b", RegexOptions.IgnoreCase));
 
     public async Task<CoachReply> GuideQuestAsync(
         string quest,
@@ -23,6 +40,9 @@ internal sealed class CoachService
         bool includeBuildTip = false)
     {
         var visibleContext = $"VISIBLE QUEST:\n{quest}\n\nVISIBLE DIALOGUE:\n{dialogue}";
+        var cacheContext = $"{quest}\n{dialogue}";
+        if (_knowledge.TryGet("quest", cacheContext, $"QUEST · {quest}", out var cached))
+            return includeBuildTip ? BuildAdvisor.AppendTip(cached, config, quest, BuildGuides) : cached;
         var reply = await RequestAsync(
             $"QUEST · {quest}",
             visibleContext,
@@ -30,7 +50,8 @@ internal sealed class CoachService
             config,
             cancellationToken);
         var grounded = GroundCommonQuestInstruction(quest, reply);
-        return includeBuildTip ? BuildAdvisor.AppendTip(grounded, config, quest) : grounded;
+        _knowledge.Store("quest", cacheContext, grounded);
+        return includeBuildTip ? BuildAdvisor.AppendTip(grounded, config, quest, BuildGuides) : grounded;
     }
 
     private async Task<CoachReply> RequestAsync(
@@ -55,7 +76,7 @@ internal sealed class CoachService
                     {
                         role = "system",
                         content = """
-You are a friendly, spoiler-safe English and gameplay coach shown over Diablo Immortal.
+You are a friendly, spoiler-safe English tutor. The task may also request a literal reading of an on-screen instruction.
 You may use ONLY the visible OCR text supplied by the user. You may explain
 general English, but never use franchise knowledge, character biographies, wikis, walkthroughs,
 later quests, or predictions. Never reveal future identities, motives, bosses, locations, rewards,
@@ -64,11 +85,11 @@ Keep the player engaged, warm, and concise. Do not lecture.
 
 Return one JSON object only:
 {
-  "simple_english": "A short A2-B1 explanation, instruction, or mini challenge",
-  "traditional_chinese": "Natural Traditional Chinese (Taiwan), concise and useful",
+  "simple_english": "At most 8 English words",
+  "traditional_chinese": "At most 40 Traditional Chinese characters, one useful tip",
   "keywords": [{"word":"word or short phrase visible in the supplied text","meaning":"short Traditional Chinese meaning plus usage when useful"}]
 }
-Choose zero to three useful keywords that actually appear in the supplied visible text. Do not continue the story.
+Choose zero or ONE useful keyword that actually appears in the supplied visible text. Keep its meaning under 8 Chinese characters. Do not continue the story.
 """
                     },
                     new { role = "user", content = $"TASK:\n{task}\n\nCURRENT VISIBLE CONTEXT:\n{allowedSource}" }
@@ -77,7 +98,7 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
                 {
                     temperature = 0.1,
                     num_ctx = 2048,
-                    num_predict = 160,
+                    num_predict = 110,
                     num_thread = Math.Clamp(config.InferenceThreads, 1, 4),
                     // Keep the MX330's 2 GB VRAM free for Diablo Immortal. The
                     // 2B coach model fits comfortably in system RAM on this PC.
@@ -137,6 +158,12 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
         var root = document.RootElement;
         var simple = ReadString(root, "simple_english");
         var chinese = ReadString(root, "traditional_chinese");
+        foreach (var pair in new[] { ("boss", "頭領|首領|頭目"), ("enemy", "敵人|敵方"), ("kill", "擊殺|殺死") })
+        {
+            if (!Regex.IsMatch(allowedSource, @"\b" + pair.Item1 + @"\b", RegexOptions.IgnoreCase) &&
+                (Regex.IsMatch(simple, @"\b" + pair.Item1 + @"\b", RegexOptions.IgnoreCase) || Regex.IsMatch(chinese, pair.Item2)))
+                return MakeFallback(displayOriginal, allowedSource, "模型追加了未提供的敵我描述，已改用本機英文提示。");
+        }
         var keywords = new List<KeywordCard>();
 
         if (root.TryGetProperty("keywords", out var keywordElement) && keywordElement.ValueKind == JsonValueKind.Array)
@@ -162,6 +189,7 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
     {
         var dictionary = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
+            ["search for"] = "尋找", ["head forward"] = "往前走", ["head to"] = "前往",
             ["follow"] = "跟隨", ["find"] = "尋找", ["talk to"] = "與……交談", ["defeat"] = "擊敗",
             ["kill"] = "擊殺", ["enter"] = "進入", ["leave"] = "離開", ["return"] = "返回",
             ["rescue"] = "營救", ["collect"] = "收集", ["equip"] = "裝備", ["upgrade"] = "升級",
@@ -178,7 +206,10 @@ Choose zero to three useful keywords that actually appear in the supplied visibl
             .Select(pair => new KeywordCard(pair.Key, pair.Value))
             .ToArray();
 
-        return new CoachReply(displayOriginal, displayOriginal, "（啟動本機模型後會在這裡顯示繁中遊戲與英文教學。）", keywords, false, notice);
+        var teaching = keywords.Length > 0
+            ? $"英文小補充：{keywords[0].Word} 是「{keywords[0].Meaning}」。先抓住這個字，就比較容易理解畫面意思。"
+            : "這句還沒有可靠的補充說明，先以畫面的原文和翻譯為準。";
+        return new CoachReply(displayOriginal, displayOriginal, teaching, keywords, false, notice);
     }
 
     private static CoachReply GroundCommonQuestInstruction(string quest, CoachReply reply)
