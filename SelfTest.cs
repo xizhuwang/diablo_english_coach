@@ -6,6 +6,33 @@ namespace DiabloEnglishCoach;
 
 internal static class SelfTest
 {
+    public static async Task<bool> TestPersonalizedTeachingAsync(string outputPath)
+    {
+        var results = new List<object>();
+        var passed = true;
+        foreach (var topic in new[] { "toeic", "ic", "game" })
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var lesson = await new CoachService().CreatePersonalizedLessonAsync(
+                new LessonPersonalizationContext(topic,
+                    "多益核心字: Please confirm the delivery schedule.",
+                    "follow=跟隨, damage=傷害"),
+                "Head to Ashwold Cemetery.", "Stay close.",
+                new CoachConfig { InferenceThreads = 4 }, CancellationToken.None);
+            results.Add(new
+            {
+                topic,
+                milliseconds = watch.ElapsedMilliseconds,
+                lesson?.Title,
+                lesson?.English,
+                lesson?.Chinese
+            });
+            passed &= lesson is not null && lesson.Topic == topic;
+        }
+        Write(outputPath, new Dictionary<string, object> { ["results"] = results, ["passed"] = passed });
+        return passed;
+    }
+
     public static async Task<bool> TestTeachingAsync(string outputPath)
     {
         var results = new List<object>();
@@ -195,7 +222,7 @@ internal static class SelfTest
             checks["class_preference_changes_advice"] =
                 !BuildAdvisor.GetTips("Necromancer", "Summons").SequenceEqual(BuildAdvisor.GetTips("Necromancer", "Survival"));
 
-            var planner = new IdleLessonPlanner();
+            var planner = new IdleLessonPlanner(persistGenerated: false);
             var lessonConfig = new CoachConfig();
             planner.Reset(0);
             var lessonInterval = IdleLessonPlanner.IntervalMs;
@@ -222,10 +249,32 @@ internal static class SelfTest
             }
             checks["idle_repeats_seen_words"] = lessons.Any(lesson => lesson.English == "head to");
             checks["idle_includes_build_preparation"] = lessons.Any(lesson => lesson.Title.Contains("配裝"));
+            checks["idle_includes_toeic"] = lessons.Any(lesson => lesson.Topic == "toeic");
+            checks["idle_includes_digital_ic"] = lessons.Any(lesson => lesson.Topic == "ic");
+            checks["idle_includes_game_english"] = lessons.Any(lesson => lesson.Topic == "game");
             checks["idle_varied_lessons"] = lessons.Select(lesson => lesson.English).Distinct().Count() >= 7;
             checks["idle_avoids_short_term_repetition"] = !lessons.Zip(lessons.Skip(1))
                 .Any(pair => pair.First.English == pair.Second.English);
-            var englishOnly = new IdleLessonPlanner();
+            var generatedPlanner = new IdleLessonPlanner(persistGenerated: false);
+            var generated = new IdleLesson("AI 個人化 · 數位 IC",
+                "Describe the timing constraint before synthesis.",
+                "constraint＝限制條件。面試回答時先說明限制的目的。", "ic");
+            checks["personalized_lesson_is_queued"] = generatedPlanner.AddPersonalizedLesson(generated);
+            checks["personalized_exact_duplicate_rejected"] = !generatedPlanner.AddPersonalizedLesson(generated);
+            generatedPlanner.Reset(0);
+            checks["personalized_lesson_has_priority"] = generatedPlanner.TryNext(
+                IdleLessonPlanner.IntervalMs, true, lessonConfig, requireQuietWindow: false)?.English == generated.English;
+
+            var parsedPersonalized = CoachService.ParsePersonalizedLesson(
+                "AI 個人化 · 多益", "toeic", "confirm, schedule",
+                """{"english":"Please confirm the revised schedule.","traditional_chinese":"正式郵件中用來請對方確認。","keyword":"confirm","meaning":"確認"}""");
+            checks["personalized_model_json_parses"] = parsedPersonalized is
+                { Topic: "toeic", English: "Please confirm the revised schedule." };
+            checks["personalized_disallows_unapproved_term"] = CoachService.ParsePersonalizedLesson(
+                "AI 個人化 · 多益", "toeic", "confirm, schedule",
+                """{"english":"Please purchase the item.","traditional_chinese":"這是購買的意思。","keyword":"purchase","meaning":"購買"}""") is null;
+
+            var englishOnly = new IdleLessonPlanner(persistGenerated: false);
             var noBuild = new CoachConfig { BuildTipsEnabled = false };
             englishOnly.Reset(0);
             englishOnly.TryNext(0, true, noBuild);

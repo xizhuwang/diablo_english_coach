@@ -43,6 +43,7 @@ internal sealed class CoachConfig
     public bool BuildTipsEnabled { get; set; } = true;
     // Opt-in only: upgrading or starting the coach never grants microphone consent.
     public bool AutoSpeakingEnabled { get; set; }
+    public string LearningFocus { get; set; } = LearningFocusOptions.Balanced;
     public string PlayerClass { get; set; } = "Necromancer";
     public string BuildPreference { get; set; } = "EasyPvE";
 
@@ -72,6 +73,13 @@ internal sealed class CoachConfig
         Directory.CreateDirectory(FolderPath);
         File.WriteAllText(FilePath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
     }
+}
+
+internal static class LearningFocusOptions
+{
+    public const string Balanced = "Balanced";
+    public const string ToeicFirst = "ToeicFirst";
+    public const string DigitalIcFirst = "DigitalIcFirst";
 }
 
 internal static class TranslationProviders

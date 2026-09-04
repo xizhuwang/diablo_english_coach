@@ -67,6 +67,9 @@ internal sealed class CoachForm : Form
     private readonly FastTranslationService _fastTranslation = new();
     private readonly System.Windows.Forms.Timer _teachingTimer = new() { Interval = 1000 };
     private long _nextModelLessonAt;
+    private long _nextPersonalizationAt;
+    private bool _personalizationBusy;
+    private CancellationTokenSource? _personalizationCts;
     private (string Text, bool Quest, int Version)? _queuedTranslation;
     private bool _translating;
     private (string Text, bool Quest)? _retryTranslation;
@@ -284,6 +287,7 @@ internal sealed class CoachForm : Form
         _fastTranslation.Cancel();
         _teachingTimer.Enabled = _running && !_previewMode;
         _nextModelLessonAt = Environment.TickCount64 + 15_000;
+        _nextPersonalizationAt = Environment.TickCount64 + 8_000;
         _loadMonitor.SetEnabled(_running);
         _idleLessons.Reset(Environment.TickCount64);
         _speakingPlanner.Reset(Environment.TickCount64);
@@ -291,6 +295,7 @@ internal sealed class CoachForm : Form
         CancelSpeaking();
         if (!_running)
         {
+            CancelPersonalization();
             _translationCts?.Cancel();
             _retryRequest = null;
             _readyReply = null;
@@ -302,7 +307,7 @@ internal sealed class CoachForm : Form
         _startButton.Text = _running ? "關閉" : "開啟";
         _startButton.ForeColor = _running ? Color.FromArgb(248, 113, 113) : Color.FromArgb(167, 243, 208);
         _scanTimer.Enabled = _running && !_previewMode;
-        SetStatus(_running ? "精簡語音版啟用：翻譯獨立；模型新請求依負載使用 1～4 執行緒。" : "已暫停");
+        SetStatus(_running ? "已啟用：多益／數位 IC／遊戲英文輪替；空閒時由模型準備個人化教材。" : "已暫停");
         if (_running && !_previewMode)
             _ = ScanOnceAsync(force: false);
         BeginInvoke(RestoreGameFocus);
@@ -464,6 +469,11 @@ internal sealed class CoachForm : Form
 
     private void AcceptSubtitle(string text, bool deferCoaching = false, string loadReason = "")
     {
+        if (_personalizationBusy)
+        {
+            CancelPersonalization();
+            _nextPersonalizationAt = Environment.TickCount64 + 10_000;
+        }
         _currentDialogue = text;
         _retryRequest = null;
         _recentSentences.Enqueue(text);
@@ -478,6 +488,11 @@ internal sealed class CoachForm : Form
 
     private void AcceptQuest(string text, bool deferCoaching = false, string loadReason = "")
     {
+        if (_personalizationBusy)
+        {
+            CancelPersonalization();
+            _nextPersonalizationAt = Environment.TickCount64 + 10_000;
+        }
         _retryRequest = null;
         _recentQuests.Enqueue(text);
         while (_recentQuests.Count > 12)
@@ -579,17 +594,26 @@ internal sealed class CoachForm : Form
     private void TeachingTick()
     {
         if (!_running || _settingsOpen || _speakingCts is not null || _gameWindow is null ||
-            NativeMethods.GetForegroundWindow() != _gameWindow.Handle) return;
+            NativeMethods.GetForegroundWindow() != _gameWindow.Handle)
+        {
+            if (_personalizationBusy) CancelPersonalization();
+            return;
+        }
         var now = Environment.TickCount64;
         var load = _loadMonitor.Sample(false);
+        // Personalized generation is expendable background work. Stop it as soon
+        // as action keys or high CPU indicate that the game needs the machine.
+        if (_personalizationBusy && load.ShouldDefer)
+        {
+            CancelPersonalization();
+            _nextPersonalizationAt = now + 10_000;
+        }
         if (!_translating && now >= _translationRetryAt && _retryTranslation is { } retry &&
             (retry.Text == _currentDialogue || retry.Text == _currentQuest))
             _ = TranslateVisibleAsync(retry.Text, retry.Quest);
-        var canSpeak = NarrationMayStart() && now - _lastTeachingAt >= 1_000;
+        var canSpeak = !load.ShouldDefer && NarrationMayStart() && now - _lastTeachingAt >= 1_000;
         if (canSpeak)
         {
-            // A slow model is one occasional supplement. Cached/offline lessons
-            // keep narration flowing and never wait behind it.
             if (_readyReply is { } ready)
             {
                 _readyReply = null;
@@ -599,13 +623,72 @@ internal sealed class CoachForm : Form
             if (!_speechService.IsBusy) TryIdleLesson(load);
             if (!_speechService.IsBusy && !_coachBusy) TrySpeaking(load);
         }
-        if (_speakingCts is not null || _coachBusy || _readyReply is not null || now < _nextModelLessonAt ||
+
+        if (_speakingCts is not null || _coachBusy || _readyReply is not null ||
             load.CpuPercent >= 95 || now < _narrationGuard.BlockedUntil)
             return;
-        _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
-        _nextModelLessonAt = now + 120_000;
+
         if (_pendingQuest.Length > 0 || _pendingDialogue.Length > 0 || _retryRequest is not null)
+        {
+            if (now < _nextModelLessonAt || _personalizationBusy)
+                return;
+            _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
+            // A complex current-screen judgment is allowed sooner while idle.
+            // During action it keeps the conservative one-thread/120-second policy.
+            _nextModelLessonAt = now + (load.ShouldDefer ? 120_000 : 40_000);
             ProcessDeferredLesson();
+            return;
+        }
+
+        if (!_personalizationBusy && _idleLessons.NeedsPersonalizedLesson &&
+            now >= _nextPersonalizationAt && load.ActionKeyIdleMs >= 8_000 && load.CpuPercent < 55)
+        {
+            _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
+            StartPersonalizedLesson();
+        }
+    }
+
+    private void StartPersonalizedLesson()
+    {
+        if (_personalizationBusy || !_running || _settingsOpen)
+            return;
+        var learning = _idleLessons.CreatePersonalizationContext(_config);
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+        _personalizationCts = cts;
+        _personalizationBusy = true;
+        _nextPersonalizationAt = Environment.TickCount64 + 30_000;
+        _ = GeneratePersonalizedLessonAsync(learning, cts);
+    }
+
+    private async Task GeneratePersonalizedLessonAsync(
+        LessonPersonalizationContext learning,
+        CancellationTokenSource cts)
+    {
+        try
+        {
+            var lesson = await _coachService.CreatePersonalizedLessonAsync(
+                learning, _currentQuest, _currentDialogue, _config, cts.Token);
+            if (!cts.IsCancellationRequested && _running && lesson is not null &&
+                _idleLessons.AddPersonalizedLesson(lesson))
+                SetStatus($"已準備下一則{LearningTopicLabel(learning.Topic)}個人化教材 · 本機快取");
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            if (ReferenceEquals(_personalizationCts, cts))
+            {
+                _personalizationBusy = false;
+                _personalizationCts = null;
+            }
+            cts.Dispose();
+        }
+    }
+
+    private void CancelPersonalization()
+    {
+        _personalizationCts?.Cancel();
+        _personalizationCts = null;
+        _personalizationBusy = false;
     }
 
     private bool NarrationEnvironmentClear() => _narrationGuard.MayStart(
@@ -631,7 +714,9 @@ internal sealed class CoachForm : Form
             return;
         // Keep the quest and its translation visible. Supplement only the right column.
         _keywordsLabel.Text = $"{lesson.Title}\n{lesson.English}\n{lesson.Chinese}";
-        SetStatus("空閒補充 · 本機教材 · 無額外模型呼叫");
+        SetStatus(lesson.Title.StartsWith("AI 個人化", StringComparison.Ordinal)
+            ? "空閒補充 · 個人化教材 · 已存本機避免重複"
+            : "空閒補充 · 多益／數位 IC／遊戲英文備用教材");
         SpeakLesson(lesson.English, lesson.Chinese);
     }
 
@@ -740,6 +825,7 @@ internal sealed class CoachForm : Form
         _settingsOpen = true;
         _runVersion++;
         CancelSpeaking();
+        CancelPersonalization();
         _translationCts?.Cancel();
         // Retain the menu until the next opening/form shutdown. Disposing in
         // Closed breaks ToolStrip's own click/close event sequence.
@@ -764,6 +850,15 @@ internal sealed class CoachForm : Form
         var speaking = new ToolStripMenuItem("自動口說（空閒時）") { Checked = _config.AutoSpeakingEnabled };
         speaking.Click += (_, _) => ToggleAutoSpeaking();
         menu.Items.Add(speaking);
+
+        var learning = new ToolStripMenuItem($"教學重點：{LearningFocusLabel(_config.LearningFocus)}");
+        AddChoiceItems(learning, new (string Label, string Value)[]
+        {
+            ("綜合（多益＋數位 IC＋遊戲）", LearningFocusOptions.Balanced),
+            ("多益優先", LearningFocusOptions.ToeicFirst),
+            ("數位 IC 面試優先", LearningFocusOptions.DigitalIcFirst)
+        }, _config.LearningFocus, value => _config.LearningFocus = value);
+        menu.Items.Add(learning);
 
         var opacity = new ToolStripMenuItem("透明度");
         foreach (var value in new[] { 0.65, 0.80, 0.92 })
@@ -1184,6 +1279,20 @@ internal sealed class CoachForm : Form
         _ => "輕鬆推進"
     };
 
+    private static string LearningFocusLabel(string value) => value switch
+    {
+        LearningFocusOptions.ToeicFirst => "多益優先",
+        LearningFocusOptions.DigitalIcFirst => "數位 IC 優先",
+        _ => "綜合"
+    };
+
+    private static string LearningTopicLabel(string value) => value switch
+    {
+        "toeic" => "多益",
+        "ic" => "數位 IC",
+        _ => "遊戲英文"
+    };
+
     private void OnFormClosing(object? sender, FormClosingEventArgs eventArgs)
     {
         _running = false;
@@ -1197,6 +1306,7 @@ internal sealed class CoachForm : Form
         _scanTimer.Stop();
         _lifetimeCts.Cancel();
         _teachingTimer.Stop();
+        CancelPersonalization();
         _fastTranslation.Dispose();
         _translationCts?.Cancel();
         _speechService.Dispose();
@@ -1240,6 +1350,8 @@ internal sealed class CoachForm : Form
             if (!_settingsMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "本機流派資料／更新狀態"))
                 return false;
             if (!_settingsMenu.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "翻譯方式（本機）"))
+                return false;
+            if (!_settingsMenu!.Items.OfType<ToolStripMenuItem>().Any(item => item.Text?.StartsWith("教學重點：", StringComparison.Ordinal) == true))
                 return false;
             _settingsMenu!.Close();
             Application.DoEvents();

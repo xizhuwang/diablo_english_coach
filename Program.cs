@@ -10,6 +10,11 @@ internal static class Program
             Environment.ExitCode = SelfTest.TestTeachingAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult() ? 0 : 1;
             return;
         }
+        if (args.Length >= 2 && args[0] == "--personalized-teaching-test")
+        {
+            Environment.ExitCode = SelfTest.TestPersonalizedTeachingAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult() ? 0 : 1;
+            return;
+        }
         if (args.Length >= 2 && args[0] == "--translation-test")
         {
             Environment.ExitCode = FastTranslationSelfTest.LiveAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult() ? 0 : 1;
