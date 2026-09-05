@@ -21,6 +21,14 @@ internal static class FastTranslationSelfTest
         var hallucination = CoachService.ParseModelReply("Search for Leoric", """{"simple_english":"Look for the boss","traditional_chinese":"尋找頭領","keywords":[]}""");
         checks["invented_boss_is_not_spoken"] = !hallucination.UsedLocalModel && !hallucination.TraditionalChinese.Contains("頭領");
         checks["dialogue_not_interpreted_as_quest"] = FastTranslationService.TryLocal("Head to the gate", false) is null;
+        checks["known_dialogue_is_immediate"] = FastTranslationService.StableFramesRequired("Watch out!", false) == 1;
+        checks["unknown_dialogue_waits_for_second_frame"] = FastTranslationService.StableFramesRequired("A shadow moves beyond the crypt.", false) == 2;
+        var localDraft = FastTranslationService.QuickPreview("The enemy deals damage nearby.");
+        checks["local_draft_is_chinese_only"] = localDraft.Contains("敵人") && localDraft.Contains("傷害") &&
+            !localDraft.Contains("enemy", StringComparison.OrdinalIgnoreCase) && !localDraft.Contains("原文");
+        var unknownDraft = FastTranslationService.QuickPreview("A shadow moves beyond the crypt.");
+        checks["unknown_draft_never_echoes_ocr"] = unknownDraft == "正在整理繁中翻譯……" &&
+            !unknownDraft.Contains("shadow", StringComparison.OrdinalIgnoreCase);
         checks["local_translation_cleans_game_terms"] = FastTranslationService.CleanLocalModelReply(
             "The skill deals damage to the undead.", "翻譯：技術會對不死之人造成損害。") == "技能會對不死族造成傷害。";
         checks["busy_model_one_thread"] = AdaptiveLoadMonitor.InferenceBudget(new(30, 0, true), 8) == 1;
@@ -114,6 +122,10 @@ internal static class FastTranslationSelfTest
                     localHandler.LastUri.Port == 11434 && localHandler.LastUri.AbsolutePath == "/api/chat";
                 checks["local_model_prompt_has_game_glossary"] = localHandler.LastBody.Contains("summons") &&
                     localHandler.LastBody.Contains("qwen3.5:0.8b");
+                var localPrompt = JsonDocument.Parse(localHandler.LastBody).RootElement.GetProperty("messages")[1]
+                    .GetProperty("content").GetString() ?? "";
+                checks["local_model_corrects_local_draft"] = localPrompt.Contains("LOCAL DRAFT") &&
+                    localPrompt.Contains("快速理解：") && localPrompt.Contains("技能") && localPrompt.Contains("傷害");
                 await localService.WarmAsync(local, default);
                 await localService.WarmAsync(local, default);
                 checks["warmup_always_reaches_model_not_ocr_or_cache"] = localHandler.Calls == 3 && localHandler.LastBody.Contains("Stay ready.");

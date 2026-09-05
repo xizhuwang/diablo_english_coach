@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace DiabloEnglishCoach;
 
@@ -591,7 +592,10 @@ internal sealed class CoachForm : Form
                 _candidateCount = 1;
             }
 
-            if (_candidateCount >= 1 && !_recentSentences.Any(previous => Similar(previous, text) >= 0.97))
+            // Unknown OCR must agree twice before it replaces an in-flight
+            // translation. Known local phrases remain instant.
+            var stableFrames = FastTranslationService.StableFramesRequired(text, false);
+            if (_candidateCount >= stableFrames && !_recentSentences.Any(previous => Similar(previous, text) >= 0.94))
                 AcceptSubtitle(text, deferCoaching, loadReason);
         }
         else
@@ -729,7 +733,7 @@ internal sealed class CoachForm : Form
         var version = ++_translationVersion;
         _retryTranslation = null;
         _queuedTranslation = (text, quest, version); // One newest item, never a growing FIFO.
-        _translationText = FastTranslationService.QuickPreview(text);
+        _translationText = FastTranslationService.QuickPreview(text, quest);
         if (_speakingCts is null) _chineseLabel.Text = _translationText;
         if (_translating)
         {
@@ -744,11 +748,12 @@ internal sealed class CoachForm : Form
                 _queuedTranslation = null;
                 var result = _previewMode && _previewTranslate is not null
                     ? await _previewTranslate(next.Text, next.Quest)
-                    : await _fastTranslation.TranslateAsync(next.Text, next.Quest, _config, _lifetimeCts.Token,
-                        partial => ShowPartialTranslation(next.Version, partial));
+                    : await _fastTranslation.TranslateAsync(next.Text, next.Quest, _config, _lifetimeCts.Token);
                 if (!_running || IsDisposed || next.Version != _translationVersion) continue;
-                _translationText = result.Text is { Length: > 0 }
-                    ? result.Text : $"{result.Source} · {next.Text}";
+                // A failed/cancelled refinement must not put raw OCR back into
+                // the overlay or erase the useful local first pass.
+                if (result.Text is { Length: > 0 })
+                    _translationText = result.Text;
                 var retryLocal = _config.TranslationProvider == TranslationProviders.LocalOllama &&
                     result.Source.Contains("未啟動或超過", StringComparison.Ordinal);
                 var retryAzure = _config.TranslationProvider == TranslationProviders.Azure &&
@@ -780,7 +785,10 @@ internal sealed class CoachForm : Form
     private void ShowPartialTranslation(int version, string partial)
     {
         if (!_running || IsDisposed || _settingsOpen || version != _translationVersion) return;
-        _translationText = $"{partial} ▌（生成中，尚未完整）";
+        // Used only by diagnostics now. Live model fragments stay off-screen so
+        // the player sees one stable draft followed by one complete correction.
+        if (!Regex.IsMatch(partial, @"[。！？!?]$")) return;
+        _translationText = TraditionalText.Convert(partial);
         if (_speakingCts is null) _chineseLabel.Text = _translationText;
     }
 
@@ -1735,8 +1743,10 @@ internal sealed class CoachForm : Form
         _ = TranslateVisibleAsync("new sentence", false);
         ShowPartialTranslation(_translationVersion - 1, "舊片段不可顯示");
         if (_chineseLabel.Text.Contains("舊片段")) return false;
-        ShowPartialTranslation(_translationVersion, "最新片段");
-        if (!_chineseLabel.Text.Contains("最新片段") || !_chineseLabel.Text.Contains("尚未完整")) return false;
+        ShowPartialTranslation(_translationVersion, "未完成片段");
+        if (_chineseLabel.Text.Contains("未完成片段")) return false;
+        ShowPartialTranslation(_translationVersion, "完整片段。");
+        if (!_chineseLabel.Text.Contains("完整片段。")) return false;
         oldTranslation.SetResult(new("過期譯文", "test", 0));
         Application.DoEvents();
         if (_chineseLabel.Text == "過期譯文" || !translatedInputs.SequenceEqual(new[] { "old sentence", "new sentence" })) return false;
