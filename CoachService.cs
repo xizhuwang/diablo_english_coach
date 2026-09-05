@@ -15,16 +15,19 @@ internal sealed class CoachService
         // models into franchise recall. Keep them out of this inference task.
         var phrase = LearningPhrase(original);
         var teachingContext = phrase ?? original;
-        if (_knowledge.TryGet("english-game-v3", teachingContext, original, out var cached))
+        if (_knowledge.TryGet("english-game-small-first-v4", teachingContext, original, out var cached))
             return cached;
-        var reply = await RequestAsync(
+        var task =
+            "Teach the visible English phrase in an action-RPG context. Give one hypothetical game-English example (not a new game instruction) and explain its usage in Traditional Chinese. Stay on that same phrase; do not switch to workplace, exams or circuit design. Do not describe a character or enemy. Return at most one keyword. Chinese under 30 characters, English under 8 words.";
+        var reply = await RequestSmallFirstAsync(
             original,
             teachingContext,
-            "Teach the visible English phrase in an action-RPG context. Give one hypothetical game-English example (not a new game instruction) and explain its usage in Traditional Chinese. Stay on that same phrase; do not switch to workplace, exams or circuit design. Do not describe a character or enemy. Return at most one keyword. Chinese under 30 characters, English under 8 words.",
+            task,
             config,
-            cancellationToken);
+            cancellationToken,
+            EnglishTeachingUseful);
         reply = reply with { TraditionalChinese = "英文用法：" + reply.TraditionalChinese };
-        _knowledge.Store("english-game-v3", teachingContext, reply);
+        if (reply.UsedLocalModel) _knowledge.Store("english-game-small-first-v4", teachingContext, reply);
         return reply;
     }
 
@@ -41,34 +44,97 @@ internal sealed class CoachService
     {
         var visibleContext = $"VISIBLE QUEST:\n{quest}\n\nVISIBLE DIALOGUE:\n{dialogue}";
         var cacheContext = $"{quest}\n{dialogue}";
-        if (_knowledge.TryGet("quest", cacheContext, $"QUEST · {quest}", out var cached))
+        if (_knowledge.TryGet("quest-purpose-v2", cacheContext, $"QUEST · {quest}", out var cached))
             return includeBuildTip ? BuildAdvisor.AppendTip(cached, config, quest, BuildGuides) : cached;
-        var reply = await RequestAsync(
+        const string task = "Act as a friendly game-and-English coach. Explain what practical purpose the visible objective serves (navigation, dialogue, combat, collecting, entering or leaving) and restate ONLY the action explicitly written in it. Start the Traditional Chinese field with 用途：. Add one short English usage point about a visible quest verb or phrase. Never add a second action. Never suggest talking, fighting, collecting, or interacting unless that exact action appears in the visible text. Do not invent a route, target, NPC, reward or later event.";
+        var reply = await RequestSmallFirstAsync(
             $"QUEST · {quest}",
             visibleContext,
-            "Act as a friendly game-and-English coach. Restate ONLY the action explicitly written in the visible quest; do not add a second action. Start the Traditional Chinese field with 現在要做：, then add one short 英文小知識： about a quest verb or phrase. If useful, you may say that selecting the visible quest entry may show a marker, but label this as 操作建議. Never suggest talking, fighting, collecting, or interacting unless that exact action appears in the visible text. Do not invent a route, target, NPC, reward, or later event.",
+            task,
             config,
-            cancellationToken);
+            cancellationToken,
+            QuestReplyUseful);
         var grounded = GroundCommonQuestInstruction(quest, reply);
-        _knowledge.Store("quest", cacheContext, grounded);
+        if (grounded.UsedLocalModel) _knowledge.Store("quest-purpose-v2", cacheContext, grounded);
         return includeBuildTip ? BuildAdvisor.AppendTip(grounded, config, quest, BuildGuides) : grounded;
     }
+
+    private async Task<CoachReply> RequestSmallFirstAsync(
+        string displayOriginal,
+        string allowedSource,
+        string task,
+        CoachConfig config,
+        CancellationToken cancellationToken,
+        Func<CoachReply, bool> useful)
+    {
+        // The 0.8B translator is normally warm because live translation uses it.
+        // Give it a short chance to classify/explain the OCR text. Escalate only
+        // malformed, generic or timed-out results to the slower 2B coach.
+        using var quick = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        quick.CancelAfter(TimeSpan.FromSeconds(10));
+        CoachReply? first = null;
+        try
+        {
+            first = await RequestAsync(displayOriginal, allowedSource, task, config,
+                quick.Token, config.TranslationModel);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+        if (first is not null && useful(first))
+            return first with { Notice = $"小模型即時判斷 · {config.TranslationModel}" };
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (config.InferenceThreads <= 1)
+            return (first ?? MakeFallback(displayOriginal, allowedSource, "小模型沒有可靠結果；忙碌時略過大模型。"))
+                with { Notice = "小模型結果不足；目前遊戲忙碌，已略過大模型" };
+
+        CoachReply detailed;
+        using var slower = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        slower.CancelAfter(TimeSpan.FromSeconds(25));
+        try
+        {
+            detailed = await RequestAsync(displayOriginal, allowedSource, task, config,
+                slower.Token, config.Model);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return (first ?? MakeFallback(displayOriginal, allowedSource, "模型未在背景時限內完成。"))
+                with { Notice = "小模型結果不足；大模型背景判斷超過 25 秒" };
+        }
+        return useful(detailed)
+            ? detailed with { Notice = $"小模型結果不足，已由 {config.Model} 補充" }
+            : detailed;
+    }
+
+    internal static bool EnglishTeachingUseful(CoachReply reply) =>
+        reply.UsedLocalModel && reply.SimpleEnglish.Length is >= 3 and <= 100 &&
+        reply.TraditionalChinese.Length is >= 5 and <= 160 &&
+        !reply.TraditionalChinese.Contains("沒有說明", StringComparison.Ordinal) &&
+        !reply.TraditionalChinese.Contains("解析完成", StringComparison.Ordinal);
+
+    internal static bool QuestReplyUseful(CoachReply reply) =>
+        reply.UsedLocalModel && reply.TraditionalChinese.Length is >= 8 and <= 180 &&
+        !reply.TraditionalChinese.Contains("沒有說明", StringComparison.Ordinal) &&
+        !reply.TraditionalChinese.Contains("解析完成", StringComparison.Ordinal) &&
+        (reply.TraditionalChinese.Contains("用途", StringComparison.Ordinal) ||
+         reply.TraditionalChinese.Contains("現在要做", StringComparison.Ordinal));
 
     private async Task<CoachReply> RequestAsync(
         string displayOriginal,
         string allowedSource,
         string task,
         CoachConfig config,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? modelOverride = null)
     {
         try
         {
             var endpoint = new Uri(new Uri(config.OllamaUrl.TrimEnd('/') + "/"), "api/chat");
             var request = new
             {
-                model = config.Model,
+                model = string.IsNullOrWhiteSpace(modelOverride) ? config.Model : modelOverride,
                 stream = false,
                 think = false,
+                keep_alive = "15m",
                 format = "json",
                 messages = new object[]
                 {
@@ -489,7 +555,7 @@ OCR CONTEXT (optional, no spoilers): quest={LimitContext(currentQuest)} dialogue
     private static string FriendlyOllamaError(Exception exception) => exception switch
     {
         HttpRequestException => "無法連到 Ollama。請執行「安裝本機模型.cmd」，或確認 Ollama 正在執行。",
-        TaskCanceledException => "本機模型超過 45 秒仍未回覆；本次只顯示 OCR 與基本詞彙。",
+        TaskCanceledException => "本機模型超過等待時間；本次只顯示 OCR 與基本詞彙。",
         JsonException => "模型回覆格式不完整；本次只顯示 OCR 與基本詞彙。",
         _ => $"本機模型暫時無法使用：{exception.Message}"
     };

@@ -27,6 +27,16 @@ internal static class ExperienceSelfTest
             ["ocr_filters_numbered_trade_channel"] = OcrService.IsChatOrAdvertising("[1] player: anyone selling gems?"),
             ["ocr_filters_cropped_trade_offer"] = OcrService.IsChatOrAdvertising("WTS 1000 Platinum $4.99"),
             ["ocr_keeps_story_purchase"] = !OcrService.IsChatOrAdvertising("We must buy medicine for the wounded."),
+            ["screen_ui_detects_exit_prompt"] = ScreenTextPolicy.IsLikelyInterfaceText("Leave Mad King's Breach"),
+            ["screen_ui_keeps_character_imperative"] = !ScreenTextPolicy.IsLikelyInterfaceText("Follow me and stay close."),
+            ["quest_progress_does_not_retrigger"] = ScreenTextPolicy.SamePurpose("Defeat the guards 2/5", "Defeat the guards 3/5"),
+            ["quest_purpose_explains_navigation"] = ScreenTextPolicy.Explain("Head to Guard's Watch") is
+                { Chinese: var purpose } && purpose.Contains("用途：導航目標") && purpose.Contains("Guard's Watch"),
+            ["tracking_control_explains_purpose"] = ScreenTextPolicy.Explain("Click to stop tracking quests") is
+                { Chinese: var tracking } && tracking.Contains("任務追蹤開關") && tracking.Contains("不是放棄任務"),
+            ["small_model_good_teaching_accepted"] = CoachService.EnglishTeachingUseful(new CoachReply("x", "Use this skill.", "這句說明技能用途。", [], true)),
+            ["small_model_generic_quest_escalates"] = !CoachService.QuestReplyUseful(new CoachReply("x", "x", "目前畫面沒有說明。", [], true)),
+            ["small_model_useful_quest_accepted"] = CoachService.QuestReplyUseful(new CoachReply("x", "Go to the gate.", "用途：導航目標。現在前往大門。", [], true)),
             ["speaking_moderate_load_allowed"] = SpeakingPlanner.CanStart(true, true, false, 60, 9000, 9000, 9000),
             ["speaking_recent_action_blocked"] = !SpeakingPlanner.CanStart(true, true, false, 30, 500, 9000, 9000)
         };

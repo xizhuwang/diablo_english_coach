@@ -53,6 +53,7 @@ internal sealed class CoachForm : Form
     private string _questCandidate = string.Empty;
     private int _questCandidateCount;
     private string _currentDialogue = string.Empty;
+    private string _currentInterfaceText = string.Empty;
     private string _pendingDialogue = string.Empty;
     private string _pendingQuest = string.Empty;
     private readonly Queue<string> _recentSentences = new();
@@ -577,6 +578,11 @@ internal sealed class CoachForm : Form
 
         if (kind == CaptureRegionKind.Dialogue)
         {
+            if (ScreenTextPolicy.IsLikelyInterfaceText(text))
+            {
+                AcceptInterfaceText(text);
+                return true;
+            }
             if (Similar(_candidate, text) >= 0.84)
                 _candidateCount++;
             else
@@ -598,7 +604,8 @@ internal sealed class CoachForm : Form
                 _questCandidateCount = 1;
             }
 
-            if (_questCandidateCount >= 1 && Similar(_currentQuest, text) < 0.90 &&
+            if (_questCandidateCount >= 1 && !ScreenTextPolicy.SamePurpose(_currentQuest, text) &&
+                Similar(_currentQuest, text) < 0.90 &&
                 !_recentQuests.Any(previous => Similar(previous, text) >= 0.97))
                 AcceptQuest(text, deferCoaching, loadReason);
         }
@@ -625,6 +632,20 @@ internal sealed class CoachForm : Form
             SetStatus($"{loadReason} · 已記住新對話，空閒時補充英文。");
     }
 
+    private void AcceptInterfaceText(string text)
+    {
+        if (ScreenTextPolicy.SamePurpose(_currentInterfaceText, text)) return;
+        var purpose = ScreenTextPolicy.Explain(text);
+        if (purpose is null) return; // Menu decoration is not worth translating.
+        _currentInterfaceText = text;
+        _translationText = purpose.Chinese;
+        if (_speakingCts is null) _chineseLabel.Text = _translationText;
+        BufferReadyReply(new CoachReply($"UI · {text}", text,
+            purpose.Chinese,
+            [new KeywordCard(purpose.Keyword, purpose.EnglishTip)], false));
+        SetStatus("已辨識畫面功能；只在用途改變時說明一次。");
+    }
+
     private void AcceptQuest(string text, bool deferCoaching = false, string loadReason = "")
     {
         if (_personalizationBusy)
@@ -639,8 +660,14 @@ internal sealed class CoachForm : Form
 
         _pendingQuest = text;
         _currentQuest = text;
-        if (Environment.TickCount64 - _lastDialogueAt > 4000)
-            _ = TranslateVisibleAsync(text, true);
+        // A persistent quest tracker does not need repeated literal translation.
+        // Show its gameplay purpose immediately; unknown objectives are routed
+        // through the small-first coach below.
+        if (Environment.TickCount64 - _lastDialogueAt > 4000 && ScreenTextPolicy.Explain(text) is { } purpose)
+        {
+            _translationText = purpose.Chinese;
+            if (_speakingCts is null) _chineseLabel.Text = _translationText;
+        }
         if (deferCoaching)
             SetStatus($"{loadReason} · 已記住新任務，空閒時補充指引。");
     }
@@ -652,10 +679,11 @@ internal sealed class CoachForm : Form
             var quest = _pendingQuest;
             _pendingQuest = string.Empty;
             var includeTip = ShouldIncludeBuildTip();
-            if (FastTranslationService.TryLocal(quest, true) is { } quick)
+            if (ScreenTextPolicy.Explain(quest) is { } purpose)
             {
-                var reply = new CoachReply($"QUEST · {quest}", quest, $"現在要做：{quick}",
-                    Array.Empty<KeywordCard>(), false);
+                var reply = new CoachReply($"QUEST · {quest}", quest,
+                    purpose.Chinese,
+                    [new KeywordCard(purpose.Keyword, purpose.EnglishTip)], false);
                 BufferReadyReply(includeTip ? BuildAdvisor.AppendTip(reply, _config, quest, _buildGuides) : reply);
                 return;
             }
@@ -671,9 +699,20 @@ internal sealed class CoachForm : Form
         {
             var dialogue = _pendingDialogue;
             _pendingDialogue = string.Empty;
+            // OCR filtering found a trusted game word: explain it immediately
+            // from the local curriculum instead of spending any model time.
+            if (GameContextLessons.Find(dialogue, "").FirstOrDefault() is { } link)
+            {
+                var lesson = GameContextLessons.Create(link, false);
+                BufferReadyReply(new CoachReply(dialogue, lesson.English,
+                    $"畫面重點：{lesson.SentenceMeaning} {lesson.Chinese}",
+                    [new KeywordCard(link.Word, link.Meaning)], false,
+                    "本機畫面詞彙教練 · 不需等待模型"));
+                return;
+            }
             StartCoachRequest(
                 dialogue,
-                "正在準備剛才的英文……",
+                "畫面文字已篩選；先由小模型準備英文解說……",
                 token => _coachService.ExplainAsync(dialogue, _config, token));
             return;
         }
@@ -914,7 +953,8 @@ internal sealed class CoachForm : Form
         {
             var reply = _readyReplies.Dequeue();
             if (reply.Original == _currentDialogue || reply.Original == _currentQuest ||
-                reply.Original == $"QUEST · {_currentQuest}")
+                reply.Original == $"QUEST · {_currentQuest}" ||
+                reply.Original == $"UI · {_currentInterfaceText}")
                 return reply;
         }
         return null;
@@ -936,7 +976,9 @@ internal sealed class CoachForm : Form
         _idleLessons.ObserveLesson(Environment.TickCount64, reply.Keywords, resetSchedule: false);
         // Frame the quoted source before the explanation so late results do not
         // sound like unrelated instructions. One complete speech paragraph.
-        SpeakLesson(reply.SimpleEnglish, $"{(reply.Original.StartsWith("QUEST ·") ? "目前任務說明" : "回顧剛才的英文")}。英文是：{reply.SimpleEnglish}。{Narration(reply)}");
+        var context = reply.Original.StartsWith("QUEST ·") ? "目前任務說明" :
+            reply.Original.StartsWith("UI ·") ? "畫面功能說明" : "回顧剛才的英文";
+        SpeakLesson(reply.SimpleEnglish, $"{context}。英文是：{reply.SimpleEnglish}。{Narration(reply)}");
     }
 
     private bool ShouldIncludeBuildTip()

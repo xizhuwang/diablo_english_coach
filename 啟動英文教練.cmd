@@ -1,5 +1,7 @@
 @echo off
-if exist "%~dp0publish-responsive\DiabloEnglishCoach.exe" (
+if exist "%~dp0publish-latest\DiabloEnglishCoach.exe" (
+    start "" "%~dp0publish-latest\DiabloEnglishCoach.exe"
+) else if exist "%~dp0publish-responsive\DiabloEnglishCoach.exe" (
     start "" "%~dp0publish-responsive\DiabloEnglishCoach.exe"
 ) else if exist "%~dp0publish-readable\DiabloEnglishCoach.exe" (
     start "" "%~dp0publish-readable\DiabloEnglishCoach.exe"
