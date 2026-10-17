@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$PackageRoot = (Split-Path -Parent $PSScriptRoot),
     [switch]$VerifyOnly
 )
@@ -8,11 +8,14 @@ $root = [IO.Path]::GetFullPath($PackageRoot)
 $app = Join-Path $root 'app\DiabloEnglishCoach.exe'
 $modelSetup = Join-Path $root 'scripts\setup-model.ps1'
 $speechSetup = Join-Path $root '安裝口說模型.ps1'
+$translationSetup = Join-Path $root 'scripts\setup-translation.ps1'
 
 if (-not (Test-Path -LiteralPath $app)) {
     throw "找不到程式：$app。請先解壓縮完整的 Windows x64 發布包，不要只複製 EXE。"
 }
-if (-not (Test-Path -LiteralPath $modelSetup) -or -not (Test-Path -LiteralPath $speechSetup)) {
+if (-not (Test-Path -LiteralPath $modelSetup) -or -not (Test-Path -LiteralPath $speechSetup) -or
+    -not (Test-Path -LiteralPath $translationSetup) -or
+    -not (Test-Path -LiteralPath (Join-Path $root 'scripts\translation-worker.py'))) {
     throw '安裝檔不完整，請重新下載並完整解壓縮。'
 }
 if ($VerifyOnly) {
@@ -27,9 +30,10 @@ Write-Host '模型下載約 3 GB；自然語音若保持啟用，朗讀文字會
 Write-Host ''
 
 & $speechSetup -Destination (Join-Path $root 'app\speech-model')
+& $translationSetup -PackageRoot $root
 & $modelSetup -Model 'qwen3.5:0.8b' -NonInteractive
 & $modelSetup -Model 'qwen3.5:2b-q4_K_M' -NonInteractive
 
 Write-Host ''
 Write-Host '安裝完成，正在啟動。' -ForegroundColor Green
-Start-Process -FilePath $app
+Start-Process -FilePath $app -WindowStyle Hidden

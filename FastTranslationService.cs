@@ -19,6 +19,7 @@ internal sealed class FastTranslationService : IDisposable
     private readonly Dictionary<string, string> _cache = new(StringComparer.OrdinalIgnoreCase);
     private CancellationTokenSource? _active;
     private int _cancelVersion;
+    private readonly LocalTranslationWorker _worker = new();
     private DateTimeOffset _blockedUntil;
     public int CharactersUsed { get; private set; }
 
@@ -45,7 +46,21 @@ internal sealed class FastTranslationService : IDisposable
     // Bypass both the OCR word-count gate and disk cache: a cache hit cannot
     // warm an unloaded model. Still shares the cancellable translation slot.
     public Task<TranslationResult> WarmAsync(CoachConfig config, CancellationToken token) =>
-        TranslateWithOllamaAsync("Stay ready.", "warmup-v3", config, Stopwatch.StartNew(), token, null);
+        config.TranslationProvider == TranslationProviders.LocalCpu
+            ? WarmCpuAsync(token)
+            : TranslateWithOllamaAsync("Stay ready.", "warmup-v3", config, Stopwatch.StartNew(), token, null);
+
+    private async Task<TranslationResult> WarmCpuAsync(CancellationToken token)
+    {
+        var watch = Stopwatch.StartNew();
+        try
+        {
+            var result = await _worker.TranslateAsync("The gate remains closed.", 1, token);
+            return new(result, "CPU 翻譯暖機", watch.ElapsedMilliseconds);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or JsonException or OperationCanceledException or System.ComponentModel.Win32Exception)
+        { return new(null, "CPU 翻譯尚未就緒", watch.ElapsedMilliseconds); }
+    }
 
     public async Task<TranslationResult> TranslateAsync(string text, bool quest, CoachConfig config, CancellationToken token,
         Action<string>? onPartial = null)
@@ -58,6 +73,26 @@ internal sealed class FastTranslationService : IDisposable
         var provider = config.TranslationProvider;
         var cacheKey = $"ocr-v3|{provider}|{config.TranslationModel}|{text}";
         if (_cache.TryGetValue(cacheKey, out var cached)) return Result(cached, "本機翻譯快取");
+        if (provider == TranslationProviders.LocalCpu)
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            _active = deadline;
+            var cancellationVersion = _cancelVersion;
+            try
+            {
+                var translated = await _worker.TranslateAsync(text, Math.Clamp(config.InferenceThreads, 1, 2), deadline.Token);
+                if (string.IsNullOrWhiteSpace(translated)) return Result(null, "譯文未通過名稱／數字／語意檢查");
+                translated = CleanLocalModelReply(text, translated);
+                _cache[cacheKey] = translated;
+                while (_cache.Count > 512) _cache.Remove(_cache.Keys.First());
+                await SaveAsync(deadline.Token);
+                return Result(translated, "CPU INT8 地端翻譯");
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested || cancellationVersion != _cancelVersion) { throw; }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or JsonException or OperationCanceledException or System.ComponentModel.Win32Exception)
+            { return Result(null, "地端翻譯尚未就緒；請執行安裝本機翻譯.cmd"); }
+            finally { if (ReferenceEquals(_active, deadline)) _active = null; }
+        }
         if (provider == TranslationProviders.LocalOllama)
             return await TranslateWithOllamaAsync(text, cacheKey, config, watch, token, onPartial);
         if (provider != TranslationProviders.Azure) return Result(null, "翻譯已關閉");
@@ -239,6 +274,13 @@ cooldown=冷卻時間, shard=碎片, undead=不死族, equipment=裝備.
     internal static string? TryLocal(string text, bool quest)
     {
         var clean = OcrService.Clean(text).TrimEnd('.', '!', '?');
+        var summonDamage = Regex.Match(clean, @"^Your summons deal (\d+(?:\.\d+)?)\s*% (more|less) damage$", RegexOptions.IgnoreCase);
+        if (summonDamage.Success)
+            return $"你的召喚物造成的傷害{(summonDamage.Groups[2].Value.Equals("more", StringComparison.OrdinalIgnoreCase) ? "提高" : "降低")} {summonDamage.Groups[1].Value}%。";
+        if (clean.Equals("Your summons deal increased damage", StringComparison.OrdinalIgnoreCase))
+            return "你的召喚物造成的傷害提高。";
+        if (clean.Equals("Your summons deal reduced damage", StringComparison.OrdinalIgnoreCase))
+            return "你的召喚物造成的傷害降低。";
         if (clean.Equals("I need your help. Follow me and stay close", StringComparison.OrdinalIgnoreCase))
             return "我需要你的幫忙。跟著我，保持靠近。";
         if (clean.Equals("This effect increases the damage dealt by your summons", StringComparison.OrdinalIgnoreCase))
@@ -324,6 +366,6 @@ cooldown=冷卻時間, shard=碎片, undead=不死族, equipment=裝備.
         File.Move(_path + ".tmp", _path, true);
     }
     public void Cancel() { _cancelVersion++; _active?.Cancel(); }
-    public void Dispose() { Cancel(); _http.Dispose(); }
+    public void Dispose() { Cancel(); _worker.Dispose(); _http.Dispose(); }
     private sealed record SavedTranslations(Dictionary<string, string> Cache);
 }

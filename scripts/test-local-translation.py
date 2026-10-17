@@ -42,6 +42,9 @@ def peak_memory_mib():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="local-translation-test.json")
+    parser.add_argument("--threads", type=int, nargs="+", default=[1, 4], choices=[1, 2, 4])
+    parser.add_argument("--repeats", type=int, default=1, choices=range(1, 6))
+    parser.add_argument("--pause", type=float, default=0.0)
     args = parser.parse_args()
     model = ROOT / ".local-translation" / "model" / "translate-en_zh-1_9"
     tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(model / "sentencepiece.model"))
@@ -60,12 +63,12 @@ def main():
     ]
     report = {"engine": ctranslate2.__version__, "model": "Argos en_zh 1.9",
               "device": "cpu", "compute_type": "int8", "beam_size": 2, "runs": []}
-    for threads in (1, 4):
+    for threads in args.threads:
         started = time.perf_counter()
         translator = ctranslate2.Translator(str(model / "model"), device="cpu", compute_type="int8",
                                            inter_threads=1, intra_threads=threads)
         run = {"threads": threads, "load_ms": round((time.perf_counter() - started) * 1000), "sentences": []}
-        for text in examples:
+        for text in examples * args.repeats:
             started = time.perf_counter()
             cpu_started = time.process_time()
             result = translator.translate_batch([tokenizer.encode(text, out_type=str)],
@@ -76,6 +79,7 @@ def main():
                     "cpu_ms": round((time.process_time() - cpu_started) * 1000)}
             run["sentences"].append(item)
             print(json.dumps({"threads": threads, **item}, ensure_ascii=False), flush=True)
+            time.sleep(max(0, min(args.pause, 2)))
         report["runs"].append(run)
         translator.unload_model()
         del translator

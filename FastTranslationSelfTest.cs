@@ -7,6 +7,17 @@ internal static class FastTranslationSelfTest
 {
     internal static async Task AddChecksAsync(Dictionary<string, object> checks)
     {
+        checks["ocr_confusables_repaired_conservatively"] = DialogueText.RepairConfusables("FOIIow Cain to AshwoId. I need heIp.") == "Follow Cain to Ashwold. I need help.";
+        checks["ocr_repair_preserves_codes"] = DialogueText.RepairConfusables("X10 A0B 20% I will return") == "X10 A0B 20% I will return";
+        checks["subtitle_identity_keeps_negation"] = DialogueText.Identity("Open the gate.") != DialogueText.Identity("Do not open the gate.");
+        checks["subtitle_identity_keeps_numbers"] = DialogueText.Identity("Deal 20% damage") != DialogueText.Identity("Deal 30% damage");
+        checks["model_cannot_invent_missing_word"] = !OcrRepairService.IsSafeRepair("need your help", "I need your help");
+        checks["model_cannot_remove_negation"] = !OcrRepairService.IsSafeRepair("Do not open the gate", "Do open the gate");
+        checks["model_cannot_change_quantity"] = !OcrRepairService.IsSafeRepair("Deal 20 damage", "Deal 30 damage");
+        checks["model_can_fix_l_and_i_only"] = OcrRepairService.IsSafeRepair("They are stiIl here.", "They are still here.");
+        checks["model_rejects_two_candidates"] = !OcrRepairService.IsSafeRepair("They are stiIl here.", "A: They are still here. B: They are still here.");
+        checks["summon_damage_preserves_quantity_direction"] = FastTranslationService.TryLocal("Your summons deal 15.5% less damage.", false) == "你的召喚物造成的傷害降低 15.5%。";
+        checks["summon_damage_does_not_drop_condition"] = FastTranslationService.TryLocal("Your summons deal 15.5% less damage until you return.", false) is null;
         checks["advertising_rejected"] = !OcrService.LooksLikeEnglishSubtitle("WWW.GTOPUP.TOP 10K Platinum $4.99 fast delivery");
         checks["chat_prefix_rejected"] = !OcrService.LooksLikeEnglishSubtitle("[7] merchant: come here");
         checks["normal_equipment_not_rejected"] = OcrService.LooksLikeEnglishSubtitle("Your summons deal increased damage.");

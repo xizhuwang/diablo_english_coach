@@ -1,4 +1,5 @@
 using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using Windows.Globalization;
 using Windows.Graphics.Imaging;
@@ -9,9 +10,10 @@ namespace DiabloEnglishCoach;
 
 internal sealed partial class OcrService
 {
-    private readonly OcrEngine _engine;
+    private OcrEngine _engine;
+    private long _nextLanguageCheck;
 
-    public string RecognizerLanguage { get; }
+    public string RecognizerLanguage { get; private set; }
 
     public OcrService()
     {
@@ -31,16 +33,36 @@ internal sealed partial class OcrService
 
     public async Task<string> RecognizeAsync(Bitmap bitmap, CancellationToken cancellationToken, bool dialogue = false)
     {
-        await using var memory = new MemoryStream();
-        bitmap.Save(memory, ImageFormat.Png);
-        memory.Position = 0;
-
-        using var randomAccess = new InMemoryRandomAccessStream();
-        await memory.CopyToAsync(randomAccess.AsStreamForWrite(), cancellationToken);
-        randomAccess.Seek(0);
-
-        var decoder = await BitmapDecoder.CreateAsync(randomAccess).AsTask(cancellationToken);
-        using var softwareBitmap = await decoder.GetSoftwareBitmapAsync().AsTask(cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Windows may finish installing English OCR while the coach is open.
+        // Probe at most once per minute; no download/admin action in the app.
+        if (!RecognizerLanguage.StartsWith("en", StringComparison.OrdinalIgnoreCase) &&
+            Environment.TickCount64 >= _nextLanguageCheck)
+        {
+            _nextLanguageCheck = Environment.TickCount64 + 60_000;
+            var english = OcrEngine.AvailableRecognizerLanguages.FirstOrDefault(
+                language => language.LanguageTag.StartsWith("en", StringComparison.OrdinalIgnoreCase));
+            if (english is not null && OcrEngine.TryCreateFromLanguage(english) is { } engine)
+            {
+                _engine = engine;
+                RecognizerLanguage = english.LanguageTag;
+            }
+        }
+        // Transfer BGRA pixels directly; PNG encoding/decoding on every scan
+        // adds work and the Windows codec rejected some small fixture images.
+        var pixels = new byte[checked(bitmap.Width * bitmap.Height * 4)];
+        var data = bitmap.LockBits(new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+            ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        try
+        {
+            for (var y = 0; y < bitmap.Height; y++)
+                Marshal.Copy(IntPtr.Add(data.Scan0, y * data.Stride), pixels, y * bitmap.Width * 4, bitmap.Width * 4);
+        }
+        finally { bitmap.UnlockBits(data); }
+        using var writer = new DataWriter();
+        writer.WriteBytes(pixels);
+        using var softwareBitmap = SoftwareBitmap.CreateCopyFromBuffer(writer.DetachBuffer(),
+            BitmapPixelFormat.Bgra8, bitmap.Width, bitmap.Height, BitmapAlphaMode.Ignore);
         var result = await _engine.RecognizeAsync(softwareBitmap).AsTask(cancellationToken);
         // A single chat/ad line must not poison an otherwise useful subtitle.
         return DialogueText.Normalize(result.Lines.Select(line =>
@@ -50,6 +72,17 @@ internal sealed partial class OcrService
                 boxes.Min(b => b.Top), boxes.Max(b => b.Bottom) - boxes.Min(b => b.Top),
                 boxes.Max(b => b.Right) - boxes.Min(b => b.Left));
         }), dialogue);
+    }
+
+    public async Task<string> RecognizeAdaptiveAsync(Bitmap bitmap, CancellationToken token, bool dialogue = false)
+    {
+        var raw = await RecognizeAsync(bitmap, token, dialogue);
+        if (LooksLikeEnglishSubtitle(raw) && !DialogueText.NeedsRepair(raw)) return raw;
+        using var prepared = CaptureService.PrepareForOcr(bitmap);
+        var enhanced = await RecognizeAsync(prepared, token, dialogue);
+        if (LooksLikeEnglishSubtitle(enhanced) && !DialogueText.NeedsRepair(enhanced) &&
+            enhanced.Length >= raw.Length * .85) return enhanced;
+        return raw.Length > 0 ? raw : enhanced;
     }
 
     public static string Clean(string text)

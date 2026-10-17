@@ -51,6 +51,9 @@ internal sealed class CoachForm : Form
     private int _questGuidanceCount;
     private string _candidate = string.Empty;
     private int _candidateCount;
+    private readonly OcrRepairService _ocrRepair = new();
+    private string _repairCandidate = "";
+    private string _lastRepairAttempt = "";
     private string _questCandidate = string.Empty;
     private int _questCandidateCount;
     private string _currentDialogue = string.Empty;
@@ -97,6 +100,12 @@ internal sealed class CoachForm : Form
     public CoachForm(bool previewMode = false)
     {
         _previewMode = previewMode;
+        if (_config.TranslationPipelineVersion < 1)
+        {
+            if (_config.TranslationProvider == TranslationProviders.LocalOllama)
+                _config.TranslationProvider = TranslationProviders.LocalCpu;
+            _config.TranslationPipelineVersion = 1;
+        }
         if (_config.ExperienceVersion < 1)
         {
             _config.SpeechRatePercent = Math.Min(0, _config.SpeechRatePercent);
@@ -373,6 +382,8 @@ internal sealed class CoachForm : Form
 
     private async void OnShown(object? sender, EventArgs eventArgs)
     {
+        if (_config.TranslationProvider is TranslationProviders.LocalOllama or TranslationProviders.LocalCpu)
+            _ = WarmLocalTranslationAsync();
         _ = UpdateBuildGuidesAsync(); // Small public text fetch; never block OCR/model startup.
         _gameWindow = CaptureService.FindDiabloWindow();
         if (_gameWindow is not null && _positionAtGameOnShown)
@@ -380,8 +391,6 @@ internal sealed class CoachForm : Form
         var model = await _coachService.CheckAsync(_config, _lifetimeCts.Token);
         var game = _gameWindow is null ? "尚未找到 Diablo Immortal 視窗" : "已找到遊戲視窗";
         SetStatus($"{game} · {model.Message}");
-        if (_config.TranslationProvider == TranslationProviders.LocalOllama)
-            _ = WarmLocalTranslationAsync();
     }
 
     private async Task WarmLocalTranslationAsync()
@@ -452,7 +461,7 @@ internal sealed class CoachForm : Form
         {
             var load = _loadMonitor.Sample(false);
             _config.InferenceThreads = AdaptiveLoadMonitor.InferenceBudget(load, Environment.ProcessorCount);
-            _scanTimer.Interval = load.CpuPercent >= 85 ? 2000 : load.ShouldDefer ? 650 : 350;
+            _scanTimer.Interval = load.CpuPercent >= 90 ? 650 : load.ShouldDefer ? 450 : 300;
             if (_gameWindow is null || !CaptureService.TryRefresh(_gameWindow, out var refreshed))
             {
                 _gameWindow = CaptureService.FindDiabloWindow();
@@ -497,7 +506,8 @@ internal sealed class CoachForm : Form
             // Quest objectives persist much longer than dialogue. Read them only
             // every twelfth cycle and accept only a real change; this keeps the
             // left panel useful as context without repeatedly translating it.
-            var shouldScanQuest = force || _scanSequence++ % 12 == 0;
+            // A new subtitle's short second look must not wait behind quest OCR.
+            var shouldScanQuest = force || (_candidateCount != 1 && _scanSequence++ % 12 == 0);
             var questText = _config.QuestRegionConfigured && shouldScanQuest
                 ? await RecognizeRegionAsync(CaptureRegionKind.Quest)
                 : string.Empty;
@@ -564,8 +574,7 @@ internal sealed class CoachForm : Form
         if (_gameWindow is null)
             return string.Empty;
         using var capture = CaptureService.CaptureRegion(_gameWindow, _config, kind);
-        using var prepared = CaptureService.PrepareForOcr(capture);
-        return await _ocrService.RecognizeAsync(prepared, _lifetimeCts.Token, dialogue: kind == CaptureRegionKind.Dialogue);
+        return await _ocrService.RecognizeAdaptiveAsync(capture, _lifetimeCts.Token, dialogue: kind == CaptureRegionKind.Dialogue);
     }
 
     private bool HandleRecognizedText(
@@ -575,28 +584,48 @@ internal sealed class CoachForm : Form
         string loadReason)
     {
         if (!OcrService.LooksLikeEnglishSubtitle(text))
+        {
+            if (kind == CaptureRegionKind.Dialogue)
+            {
+                _candidate = "";
+                _candidateCount = 0;
+                _repairCandidate = "";
+            }
             return false;
+        }
 
         if (kind == CaptureRegionKind.Dialogue)
         {
             if (ScreenTextPolicy.IsLikelyInterfaceText(text))
             {
+                _repairCandidate = "";
                 AcceptInterfaceText(text);
                 return true;
             }
-            if (Similar(_candidate, text) >= 0.84)
-                _candidateCount++;
+            if (DialogueText.Identity(_candidate) == DialogueText.Identity(text))
+                _candidateCount = Math.Min(2, _candidateCount + 1);
             else
             {
                 _candidate = text;
                 _candidateCount = 1;
+                _repairCandidate = "";
+                _lastRepairAttempt = "";
             }
 
             // Unknown OCR must agree twice before it replaces an in-flight
             // translation. Known local phrases remain instant.
             var stableFrames = FastTranslationService.StableFramesRequired(text, false);
-            if (_candidateCount >= stableFrames && !_recentSentences.Any(previous => Similar(previous, text) >= 0.94))
+            if (_candidateCount < stableFrames) _scanTimer.Interval = 180;
+            if (_candidateCount >= stableFrames && DialogueText.NeedsRepair(text))
+            {
+                _repairCandidate = text;
+                SetStatus("字幕有疑似 OCR 錯字，保留前句並等候確認。");
+            }
+            else if (_candidateCount >= stableFrames && DialogueText.Identity(_currentDialogue) != DialogueText.Identity(text))
+            {
+                _repairCandidate = "";
                 AcceptSubtitle(text, deferCoaching, loadReason);
+            }
         }
         else
         {
@@ -733,7 +762,10 @@ internal sealed class CoachForm : Form
         var version = ++_translationVersion;
         _retryTranslation = null;
         _queuedTranslation = (text, quest, version); // One newest item, never a growing FIFO.
-        _translationText = FastTranslationService.QuickPreview(text, quest);
+        // Keep the last complete translation while a new full sentence is being
+        // translated. Partial keyword lists are not a substitute for a sentence.
+        if (FastTranslationService.TryLocal(text, quest) is { } immediate)
+            _translationText = immediate;
         if (_speakingCts is null) _chineseLabel.Text = _translationText;
         if (_translating)
         {
@@ -756,12 +788,14 @@ internal sealed class CoachForm : Form
                     _translationText = result.Text;
                 var retryLocal = _config.TranslationProvider == TranslationProviders.LocalOllama &&
                     result.Source.Contains("未啟動或超過", StringComparison.Ordinal);
+                retryLocal |= _config.TranslationProvider == TranslationProviders.LocalCpu &&
+                    result.Source.Contains("尚未就緒", StringComparison.Ordinal);
                 var retryAzure = _config.TranslationProvider == TranslationProviders.Azure &&
                     _config.OnlineTranslationEnabled && AzureCredentialStore.Exists();
                 if (result.Text is null && (retryLocal || retryAzure))
                 {
                     _retryTranslation = (next.Text, next.Quest);
-                    _translationRetryAt = Environment.TickCount64 + 60_000;
+                    _translationRetryAt = Environment.TickCount64 + (_config.TranslationProvider == TranslationProviders.LocalCpu ? 5_000 : 60_000);
                 }
                 if (_speakingCts is null) _chineseLabel.Text = _translationText;
                 SetStatus(_config.TranslationProvider == TranslationProviders.Azure
@@ -792,6 +826,18 @@ internal sealed class CoachForm : Form
         if (_speakingCts is null) _chineseLabel.Text = _translationText;
     }
 
+    private async Task RepairPendingOcrAsync(string source)
+    {
+        _lastRepairAttempt = source;
+        var run = _runVersion;
+        var repaired = await _ocrRepair.RepairAsync(source, _config, _lifetimeCts.Token);
+        if (repaired is null || IsDisposed || !_running || run != _runVersion ||
+            _settingsOpen || _repairCandidate != source ||
+            DialogueText.Identity(_candidate) != DialogueText.Identity(source)) return;
+        _repairCandidate = "";
+        AcceptSubtitle(repaired);
+    }
+
     private void TeachingTick()
     {
         _idleLessons.ObserveGameContext(Environment.TickCount64 - _lastDialogueAt <= 90_000 ? _currentDialogue : "", _currentQuest);
@@ -803,6 +849,10 @@ internal sealed class CoachForm : Form
         }
         var now = Environment.TickCount64;
         var load = _loadMonitor.Sample(false);
+        if (!_translating && !_coachBusy && !_personalizationBusy && !_ocrRepair.Busy &&
+            load.CpuPercent < 55 && load.ActionKeyIdleMs >= 2500 &&
+            _repairCandidate.Length > 0 && _repairCandidate != _lastRepairAttempt)
+            _ = RepairPendingOcrAsync(_repairCandidate);
         // Personalized generation is expendable background work. Stop it as soon
         // as action keys or high CPU indicate that the game needs the machine.
         if (_personalizationBusy && load.ShouldDefer)
@@ -827,7 +877,7 @@ internal sealed class CoachForm : Form
             if (!_speechService.IsBusy) TryIdleLesson(load);
         }
 
-        if (_speakingCts is not null || _translating || _coachBusy ||
+        if (_speakingCts is not null || _translating || _coachBusy || _ocrRepair.Busy ||
             _readyReplies.Count >= ReadyReplyLimit || speakingReserved ||
             load.CpuPercent >= 95 || now < _narrationGuard.BlockedUntil)
             return;
@@ -1660,6 +1710,7 @@ internal sealed class CoachForm : Form
         _teachingTimer.Stop();
         CancelPersonalization();
         _fastTranslation.Dispose();
+        _ocrRepair.Dispose();
         _translationCts?.Cancel();
         _speechService.Dispose();
         _loadMonitor.Dispose();

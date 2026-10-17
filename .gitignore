@@ -11,6 +11,7 @@ appsettings.Local.json
 *.pfx
 *.p12
 local-translation-test*.json
+local-translation-pipeline*.json
 .vs/
 bin/
 obj/
@@ -22,6 +23,8 @@ publish-readable/
 publish-responsive/
 publish-latest/
 publish-v012/
+publish-v013/
+translation-runtime/
 translation-live*.json
 teaching-live.json
 guide-source-test.html

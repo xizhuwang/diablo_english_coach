@@ -5,6 +5,16 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args.Length >= 2 && args[0] == "--pipeline-benchmark")
+        {
+            Environment.ExitCode = PipelineBenchmark.RunAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult() ? 0 : 1;
+            return;
+        }
+        if (args.Length >= 2 && args[0] == "--ocr-benchmark")
+        {
+            OcrBenchmark.RunAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult();
+            return;
+        }
         if (args.Length >= 2 && args[0] == "--teaching-test")
         {
             Environment.ExitCode = SelfTest.TestTeachingAsync(Path.GetFullPath(args[1])).GetAwaiter().GetResult() ? 0 : 1;

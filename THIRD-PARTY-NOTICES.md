@@ -26,6 +26,14 @@ These are downloaded during setup rather than committed to this repository:
 | Ollama | MIT | https://github.com/ollama/ollama/blob/main/LICENSE |
 | Qwen 3.5 0.8B and 2B models | Apache-2.0 as shown in each Ollama model manifest | https://ollama.com/library/qwen3.5 |
 | `vosk-model-small-en-us-0.15` | Apache-2.0 | https://alphacephei.com/vosk/models |
+| Python 3.12.10 embedded | PSF; license retained in downloaded runtime | https://www.python.org/ |
+| CTranslate2 4.8.2 | MIT; upstream wheel notices retained | https://github.com/OpenNMT/CTranslate2 |
+| SentencePiece 0.2.2 | Apache-2.0 | https://github.com/google/sentencepiece |
+| NumPy 2.5.2 / PyYAML 6.0.3 | BSD-3-Clause / MIT; wheel notices retained | https://pypi.org/ |
+| opencc-python-reimplemented 0.1.7 | Apache-2.0 | https://pypi.org/project/opencc-python-reimplemented/ |
+| Argos translate-en_zh-1_9 | CC-BY 4.0; Jörg Tiedemann and Santhosh Thottingal, “OPUS-MT — Building open translation services for the World”, EAMT 2020 | https://argos-net.com/v1/translate-en_zh-1_9.argosmodel |
+
+The Argos model is used without retraining. Tokenization, protected names, Taiwan Traditional Chinese conversion and context-specific terminology corrections are application processing steps. The original model attribution README and all wheel metadata/license directories are retained under `translation-runtime`. CC-BY 4.0 terms: https://creativecommons.org/licenses/by/4.0/ . Model weights and Python wheels are downloaded by setup, not committed to this repository.
 
 Each component remains governed by its own license. The setup script verifies the Vosk archive SHA-256 and the Windows signature on the downloaded Ollama installer; a valid signature does not replace the user's review of upstream terms.
 

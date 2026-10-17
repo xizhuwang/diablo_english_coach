@@ -33,7 +33,7 @@ internal sealed class TranslationSettingsForm : Form
         var explanation = new Label
         {
             AutoSize = true, MaximumSize = new Size(585, 0),
-            Text = "推薦使用 qwen3.5:0.8b 本機小模型：免帳號、文字不上傳。第一次只要執行「安裝本機翻譯.cmd」下載約 1 GB。Azure 保留為選用備援。"
+            Text = "推薦使用 CPU 專用翻譯：免帳號、文字不上傳，最多使用 2 執行緒。先執行「安裝本機翻譯.cmd」。小模型只在背景協助修復 OCR。"
         };
         root.Controls.Add(explanation, 0, 0); root.SetColumnSpan(explanation, 2);
         _local.Checked = _config.TranslationProvider != TranslationProviders.Azure;
@@ -49,12 +49,12 @@ internal sealed class TranslationSettingsForm : Form
         _region.Text = _config.AzureTranslatorRegion;
         _region.PlaceholderText = "依 Azure 資源頁填寫，例如 eastasia；若未要求可留白";
         root.Controls.Add(_region, 1, 3);
-        _status.Text = _local.Checked ? $"狀態：本機翻譯 · {_config.TranslationModel}" :
+        _status.Text = _local.Checked ? "狀態：CPU INT8 地端翻譯" :
             AzureCredentialStore.Exists() ? "狀態：Windows 已保存 Azure 金鑰" : "狀態：尚未保存 Azure 金鑰";
         _status.ForeColor = Color.FromArgb(167, 243, 208);
         root.Controls.Add(_status, 0, 4); root.SetColumnSpan(_status, 2);
         var note = new Label { AutoSize = true, MaximumSize = new Size(585, 0), ForeColor = Color.FromArgb(156, 163, 175),
-            Text = "本機模式只連到 127.0.0.1 的 Ollama。Azure 模式才會把過濾後的英文送給 Microsoft；金鑰只存 Windows 認證管理員。" };
+            Text = "本機翻譯由常駐程序處理，不連網。背景 OCR 校正使用本機 Ollama。Azure 模式才會把過濾後的英文送給 Microsoft。" };
         root.Controls.Add(note, 0, 5); root.SetColumnSpan(note, 2);
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };
         var save = MakeButton("儲存並關閉", (_, _) => SaveAndClose());
@@ -73,7 +73,7 @@ internal sealed class TranslationSettingsForm : Form
             if (_key.TextLength > 0) AzureCredentialStore.Write(_key.Text);
             _config.AzureTranslatorRegion = _region.Text.Trim();
             _config.OnlineTranslationEnabled = AzureCredentialStore.Exists();
-            _config.TranslationProvider = _azure.Checked ? TranslationProviders.Azure : TranslationProviders.LocalOllama;
+            _config.TranslationProvider = _azure.Checked ? TranslationProviders.Azure : TranslationProviders.LocalCpu;
             _config.Save();
             Close();
         }
@@ -101,7 +101,7 @@ internal sealed class TranslationSettingsForm : Form
             return;
         }
         button.Enabled = false;
-        _status.Text = _azure.Checked ? "狀態：正在測試官方 API……" : "狀態：正在測試本機小模型……";
+        _status.Text = _azure.Checked ? "狀態：正在測試官方 API……" : "狀態：正在測試 CPU 專用翻譯……";
         var testPath = Path.Combine(Path.GetTempPath(), $"diablo-translation-test-{Guid.NewGuid():N}.json");
         try
         {
@@ -110,10 +110,10 @@ internal sealed class TranslationSettingsForm : Form
             {
                 OnlineTranslationEnabled = true,
                 AzureTranslatorRegion = _region.Text.Trim(),
-                TranslationProvider = _azure.Checked ? TranslationProviders.Azure : TranslationProviders.LocalOllama,
+                TranslationProvider = _azure.Checked ? TranslationProviders.Azure : TranslationProviders.LocalCpu,
                 TranslationModel = _config.TranslationModel,
                 OllamaUrl = _config.OllamaUrl,
-                InferenceThreads = Math.Clamp(Environment.ProcessorCount / 2, 1, 4),
+                InferenceThreads = Math.Clamp(Environment.ProcessorCount / 2, 1, 2),
                 ForceCpuInference = true
             };
             var result = await service.TranslateAsync("This is a translation test.", false, config, default);
@@ -137,7 +137,7 @@ internal sealed class TranslationSettingsForm : Form
     {
         _key.Enabled = _region.Enabled = _azure.Checked;
         if (_local.Checked)
-            _status.Text = $"狀態：本機翻譯 · {_config.TranslationModel}";
+            _status.Text = "狀態：CPU INT8 地端翻譯";
     }
     private static Button MakeButton(string text, EventHandler? click = null)
     {

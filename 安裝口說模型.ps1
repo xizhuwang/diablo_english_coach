@@ -1,4 +1,4 @@
-param([string]$Destination = (Join-Path $PSScriptRoot 'speech-model'))
+﻿param([string]$Destination = (Join-Path $PSScriptRoot 'speech-model'))
 $ErrorActionPreference = 'Stop'
 $modelName = 'vosk-model-small-en-us-0.15'
 $expectedHash = '30F26242C4EB449F948E42CB302DD7A686CB29A3423A8367F99FF41780942498'

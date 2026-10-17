@@ -9,7 +9,8 @@ internal sealed class CoachConfig
     public double RegionWidth { get; set; } = 0.46;
     public double RegionHeight { get; set; } = 0.24;
     public bool OnlineTranslationEnabled { get; set; }
-    public string TranslationProvider { get; set; } = TranslationProviders.LocalOllama;
+    public string TranslationProvider { get; set; } = TranslationProviders.LocalCpu;
+    public int TranslationPipelineVersion { get; set; }
     public string TranslationModel { get; set; } = "qwen3.5:0.8b";
     public string AzureTranslatorRegion { get; set; } = "";
     public int OverlayLayoutVersion { get; set; }
@@ -88,6 +89,7 @@ internal static class LearningFocusOptions
 
 internal static class TranslationProviders
 {
+    public const string LocalCpu = "LocalCpu";
     public const string LocalOllama = "LocalOllama";
     public const string Azure = "Azure";
     public const string Disabled = "Disabled";

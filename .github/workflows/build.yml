@@ -37,10 +37,29 @@ jobs:
           New-Item -ItemType Directory -Force dist/scripts | Out-Null
           Copy-Item scripts/setup-model.ps1 dist/scripts/setup-model.ps1
           Copy-Item scripts/setup-all.ps1 dist/scripts/setup-all.ps1
+          Copy-Item scripts/setup-translation.ps1 dist/scripts/setup-translation.ps1
+          Copy-Item scripts/translation-worker.py dist/scripts/translation-worker.py
+          Copy-Item scripts/install-english-ocr.ps1 dist/scripts/install-english-ocr.ps1
 
       - name: Verify one-click package layout
-        shell: pwsh
-        run: ./dist/scripts/setup-all.ps1 -PackageRoot ./dist -VerifyOnly
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scripts = @(Get-ChildItem dist/scripts/*.ps1) + @(Get-ChildItem dist/*.ps1)
+          foreach ($script in $scripts) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { throw "PowerShell 5.1 syntax/encoding failure: $($script.Name): $errors" }
+          }
+          ./dist/scripts/setup-all.ps1 -PackageRoot ./dist -VerifyOnly
+
+      - name: Verify portable CPU translation installation
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Download and verify actual dependencies on a clean runner. Keep
+          # runtime/model weights outside dist so the release stays lightweight.
+          ./dist/scripts/setup-translation.ps1 -PackageRoot (Join-Path $env:RUNNER_TEMP 'coach-translation-smoke')
 
       - name: Create release archive
         if: startsWith(github.ref, 'refs/tags/v')

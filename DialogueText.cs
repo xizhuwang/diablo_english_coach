@@ -25,7 +25,7 @@ internal static class DialogueText
     public static string Normalize(IEnumerable<SubtitleLine> source, bool dialogue)
     {
         var lines = source.Where(l => !OcrService.IsChatOrAdvertising(l.Text))
-            .Select(l => l with { Text = RepairZeroes(l.Text.Trim()) }).Where(l => l.Text.Length > 0).ToList();
+            .Select(l => l with { Text = RepairConfusables(RepairZeroes(l.Text.Trim())) }).Where(l => l.Text.Length > 0).ToList();
         if (dialogue && lines.Count >= 2 && IsSpeaker(lines[0], lines[1])) lines.RemoveAt(0);
         var text = string.Join(" ", lines.Select(l => l.Text));
         if (dialogue)
@@ -46,4 +46,19 @@ internal static class DialogueText
             Regex.IsMatch(heading, @"^[A-Z][a-z]{2,}(?: [A-Z][a-z]{2,}){0,2}$") &&
             !Regex.IsMatch(heading, @"^(The|You|Your|Our|Please|Stay|Follow|Help|Look|Come|Wait|Leave|Return|Head|Search|This|That|There|Hello|Thanks|Thank|Good|Goodbye|Listen|What|Why|How|Where|When|Which|Yes|Well|Never)\b");
     }
+
+    internal static string RepairConfusables(string text)
+    {
+        text = Regex.Replace(text, @"\bF[oO0][lI1]{2}[oO0]w\b", "Follow");
+        text = Regex.Replace(text, @"\bAshw[oO0][lI1]d\b", "Ashwold");
+        text = Regex.Replace(text, @"\bhe[lI1]p\b", "help");
+        text = Regex.Replace(text, @"\bc[lI1][oO0]se\b", "close");
+        return text;
+    }
+
+    // Punctuation and whitespace may drift, but never merge negation, numbers,
+    // names, or different word boundaries based on sentence similarity alone.
+    internal static string Identity(string text) => Regex.Replace(text.ToLowerInvariant(), @"[^a-z0-9']+", " ").Trim();
+
+    internal static bool NeedsRepair(string text) => Regex.IsMatch(text, @"\b[A-Za-z]+[0-9]+[A-Za-z]+\b|\b[a-z]+[A-Z][a-zA-Z]*\b|\b[A-Z][a-z]+[A-Z][a-z]*\b|\buntill\b");
 }
