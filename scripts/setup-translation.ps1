@@ -1,5 +1,6 @@
 ﻿param([string]$PackageRoot = (Split-Path -Parent $PSScriptRoot))
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $runtime = Join-Path ([IO.Path]::GetFullPath($PackageRoot)) 'translation-runtime'
 New-Item -ItemType Directory -Force $runtime | Out-Null
 function Fetch([string]$Url, [string]$Hash, [string]$Name) {
@@ -31,5 +32,5 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'translation-worker.py') -Destin
 $worker = Join-Path $runtime 'translation-worker.py'
 $exe = Join-Path $runtime 'python\python.exe'
 $reply = '{"id":1,"text":"The door remains closed.","threads":1}' | & $exe -u $worker
-if ($LASTEXITCODE -ne 0 -or -not (($reply | ConvertFrom-Json).text)) { throw '地端翻譯安裝測試失敗' }
+if ($LASTEXITCODE -ne 0 -or -not (($reply | ConvertFrom-Json).text)) { throw "地端翻譯安裝測試失敗 (exit=$LASTEXITCODE): $reply" }
 Write-Host 'CPU 地端翻譯已安裝並通過測試。' -ForegroundColor Green

@@ -78,7 +78,8 @@ if __name__ == "__main__":
     for line in sys.stdin:
         req = None
         try:
-            req = json.loads(line)
+            # Windows PowerShell 5.1 hosts can prepend a UTF-8 BOM to a pipe.
+            req = json.loads(line.lstrip("\ufeff"))
             text = req.get("text", "")
             if not isinstance(text, str) or not 1 <= len(text) <= 700:
                 raise ValueError("invalid_input")
@@ -86,4 +87,6 @@ if __name__ == "__main__":
         except Exception as exc:
             reply = {"id": req.get("id") if isinstance(locals().get("req"), dict) else None,
                      "error": str(exc)[:160]}
-        print(json.dumps(reply, ensure_ascii=False), flush=True)
+        # ASCII JSON escapes also survive legacy console code pages; the .NET
+        # JSON reader restores the same Traditional Chinese Unicode string.
+        print(json.dumps(reply, ensure_ascii=True), flush=True)
