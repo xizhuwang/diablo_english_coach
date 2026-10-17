@@ -1,4 +1,4 @@
-# v0.1.3 發布前驗證（2026-10-17）
+# CPU 翻譯新版發布驗證（2026-10-17）
 
 ## 結果
 
@@ -20,3 +20,9 @@
 沒有操作遊戲或麥克風。未重新驗證真實遊戲戰鬥幀率、所有字幕字體、自然語音網路服務或完整口說錄音往返。測試通過代表已覆蓋項目未發現失敗，不代表所有遊戲情境零錯誤。GitHub 建置及發布狀態以 Actions／Releases 實際結果為準。
 
 本機原始報告為 `local-translation-test-release-final-20261017.json` 與 `local-translation-test-release-pipeline-final-20261017.json`，不隨原始碼上傳。模型權重、語音模型、快取、使用者設定與金鑰不加入版本控制。
+
+## 乾淨環境驗證與版本紀錄
+
+最初 v0.1.3 建置在 PowerShell 管線的翻譯安裝試跑失敗，發布閘門正常擋下，沒有產生 Release 下載包。修正 worker 接受 UTF-8 BOM，回應使用 ASCII JSON escapes 避免舊主控台碼頁影響，並補充安裝錯誤細節。
+
+修正版 `38e6976` 的 [GitHub Actions 全新 Windows 環境驗證](https://github.com/xizhuwang/diablo_english_coach/actions/runs/39034550730)已成功：編譯、PowerShell 5.1 安裝包檢查、從官方來源下載／驗證／安裝 CPU 翻譯依賴及實際翻譯均通過。保留失敗的 v0.1.3 標籤，不改寫歷史；後續修正版發布為 v0.1.4。
